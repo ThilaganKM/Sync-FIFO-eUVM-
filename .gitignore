@@ -1,0 +1,13 @@
+# AI assistant context (kept local, not published)
+AGENTS.md
+CLAUDE.md
+.claude/
+
+# Simulation build outputs
+sim/euvm_dir/
+sim/obj_dir/
+sim/verilator.stamp
+sim/sync_fifo_tb
+sim/*.o
+sim/*.vcd
+sim/*.log
