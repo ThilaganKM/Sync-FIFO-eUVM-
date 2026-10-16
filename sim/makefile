@@ -8,7 +8,8 @@ SEED      ?= 1
 VERBOSITY ?= UVM_HIGH
 
 RTL_SRC = ../rtl/$(DUT).v
-TB_SRC  = ../testbench/$(TOP).d
+TB_SRC  = ../testbench/$(TOP).d \
+          ../testbench/fifo_intf.d
 
 # ---------------------------------------------------------------
 # Tools
@@ -28,6 +29,10 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
 
 .PHONY: all run clean
 
+# If a recipe fails, delete its target (e.g. verilator.stamp), so a failed
+# step is never mistaken for a finished one on the next make.
+.DELETE_ON_ERROR:
+
 all: $(TOP)
 
 run: $(TOP)
@@ -39,13 +44,15 @@ clean:
 # ---------------------------------------------------------------
 # Step 1: Verilate the RTL and compile the C++ glue
 # ---------------------------------------------------------------
+# The stamp is touched FIRST, so every file generated below is newer than it.
+# (.DELETE_ON_ERROR removes the stamp again if any step fails.)
 verilator.stamp: $(RTL_SRC)
+	touch verilator.stamp
 	verilator --no-timing --threads 1 --trace --cc --euvm $^
 	(cd euvm_dir; g++ -c $(VL_INC) V$(DUT)_euvm_funcs.cpp)
 	(cd euvm_dir; g++ -c $(VL_INC) $(ESDL_CPP)/verilated_vcd_d.cpp -o verilated_vcd_d.o)
 	(cd euvm_dir; g++ -c $(VL_INC) $(ESDL_CPP)/verilated_d.cpp -o verilated_d.o)
 	$(MAKE) -C obj_dir -f V$(DUT).mk V$(DUT)__ALL.a verilated.o verilated_vcd_c.o verilated_threads.o
-	touch verilator.stamp
 
 $(VLATOR_OBJS): verilator.stamp
 

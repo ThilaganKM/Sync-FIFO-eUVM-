@@ -19,14 +19,22 @@ A test **passes** only if the scoreboard reports zero mismatches **and** the num
 | Component | Role |
 |---|---|
 | **Item** | One clock cycle of stimulus: `rst`, `wr_en`, `rd_en`, `wr_data` (random, constrained per sequence). The monitor fills in the observed outputs: `rd_data`, `full`, `empty`, `wr_ptr`, `rd_ptr`, `wr_err`, `rd_err`. |
-| **Driver** | Drives one item per clock cycle. Applies an initial reset before the first item. |
-| **Monitor** | Takes **one snapshot per rising edge**: the inputs going into the edge, `rd_data` just before the edge, and the registered outputs. Sends the snapshot to the scoreboard. |
+| **Driver** | Drives one item per clock cycle, right after each **rising** edge. Applies an initial reset before the first item. |
+| **Monitor** | Takes **one snapshot per cycle, at the falling edge** (mid-cycle, when everything is stable): the inputs that the next rising edge will act on, `rd_data` (the value a read on that edge consumes), and the registered outputs (the result of the previous rising edge). Sends the snapshot to the scoreboard. |
 | **Scoreboard** | A cycle-accurate **reference model**: a queue (`ubyte[]`) for the contents, plus model `wr_ptr` / `rd_ptr`, predicted flags and predicted error pulses. Steps one edge at a time and compares predictions with the DUT. |
 | **Tests** | One test class per scenario (§4), selected with `+UVM_TESTNAME=...`. A shared base test builds the environment. |
 
 **Sampling rule (SPEC §5, §7, §8):** the value consumed by a read on edge N is `rd_data` **just before** edge N.
 Everything edge N produces (`full`, `empty`, pointers, `wr_err`, `rd_err`) is visible only **after** edge N, so it's compared against the model's prediction in the **next** snapshot.
-> ⚠️ Open item: confirm on the waveform whether a DUT port read at `vif.clock.posedge()` returns the pre-edge or post-edge value, before trusting any timing check.
+
+**Timing scheme (resolved, verified with a probe run):** the clock generator in `sync_fifo_tb.d` evaluates the DUT **before** toggling the testbench clock. So:
+
+| Event | What happens | Who acts |
+|---|---|---|
+| Rising edge N | The DUT updates its registers using the inputs held since the last rising edge. | **Driver** wakes and drives the inputs for edge N+1. |
+| Falling edge (between N and N+1) | No state change. Everything is stable. | **Monitor** samples: inputs for edge N+1, `rd_data` before edge N+1, outputs after edge N. |
+
+The driver and monitor work on **opposite edges**, so they never race each other.
 
 ---
 
@@ -123,7 +131,7 @@ Covergroup sampled once per edge, from the monitor snapshot plus the model level
 
 ## 8. Build order
 
-1. Makefile, `Interface.d`, `Item.d`, driver and monitor. Run TS-01 and inspect the waveform (resolves the sampling open item in §2).
+1. Makefile, `fifo_intf.d`, top `sync_fifo_tb.d` ✅ (timing scheme in §2 verified). Then `Item.d`, driver and monitor; run TS-01 and inspect the waveform.
 2. Scoreboard with CHK-01 … CHK-07.
 3. Directed tests TS-02 … TS-10.
 4. Constrained random TS-11.
