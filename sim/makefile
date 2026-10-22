@@ -3,13 +3,20 @@
 # ---------------------------------------------------------------
 DUT        = sync_fifo
 TOP        = sync_fifo_tb
-TEST      ?= Test.test
+TEST      ?= fifo_test.FifoTest
 SEED      ?= 1
 VERBOSITY ?= UVM_HIGH
 
 RTL_SRC = ../rtl/$(DUT).v
 TB_SRC  = ../testbench/$(TOP).d \
-          ../testbench/fifo_intf.d
+          ../testbench/fifo_intf.d \
+          ../testbench/fifo_item.d \
+          ../testbench/fifo_sequencer.d \
+          ../testbench/fifo_seq.d \
+          ../testbench/fifo_driver.d \
+          ../testbench/fifo_agent.d \
+          ../testbench/fifo_env.d \
+          ../testbench/fifo_test.d
 
 # ---------------------------------------------------------------
 # Tools

@@ -10,6 +10,10 @@ Nothing here gives away anything about bugs in the RTL.
   - [Should the monitor send separate read and write events?](#should-the-monitor-send-separate-read-and-write-events)
   - [Should the scoreboard mirror the FIFO memory, address by address?](#should-the-scoreboard-mirror-the-fifo-memory-address-by-address)
   - [Random tests, stress tests, coverage, assertions: where do I start?](#random-tests-stress-tests-coverage-assertions-where-do-i-start)
+  - [What is `convert2string()`, and is it needed?](#what-is-convert2string-and-is-it-needed)
+  - [Does the order of the read data matter?](#does-the-order-of-the-read-data-matter)
+  - [Why can't I use `$display`, and how do I log from a sequence?](#why-cant-i-use-display-and-how-do-i-log-from-a-sequence)
+  - [Why build the driver side first, and the monitor and scoreboard later?](#why-build-the-driver-side-first-and-the-monitor-and-scoreboard-later)
 - [Verification plan](#verification-plan)
   - [How was the verification plan derived from my scenario list?](#how-was-the-verification-plan-derived-from-my-scenario-list)
 - [Build flow](#build-flow)
@@ -24,10 +28,16 @@ Nothing here gives away anything about bugs in the RTL.
   - [How does the top file's clock line up the DUT, the driver and the monitor?](#how-does-the-top-files-clock-line-up-the-dut-the-driver-and-the-monitor)
   - [Why `"uvm_test_top*"` and not `"uvm_test_top.*"` in `uvm_config_db::set`?](#why-uvm_test_top-and-not-uvm_test_top-in-uvm_config_dbset)
   - [Why are the files and classes named `fifo_intf` / `FifoIntf`?](#why-are-the-files-and-classes-named-fifo_intf--fifointf-not-interface--intf-as-in-the-comparator)
+  - [Why does randomizing an item crash with `Illegal instruction`?](#why-does-randomizing-an-item-crash-with-illegal-instruction)
+  - [The compiler printed many errors. Where do I start?](#the-compiler-printed-many-errors-where-do-i-start)
+  - [How do `ubvec` values behave with integers and `format`?](#how-do-ubvec-values-behave-with-integers-and-format)
+  - [`get_next_item` or `try_next_item` in the driver?](#get_next_item-or-try_next_item-in-the-driver)
   - [How do I print the value of a `VlPort`?](#how-do-i-print-the-value-of-a-vlport)
 - [Git](#git)
   - [I added a file to `.gitignore` but git still tracks it. Why?](#i-added-a-file-to-gitignore-but-git-still-tracks-it-why)
   - [Untracking a file hides it from future commits. Is it gone from the repo?](#untracking-a-file-hides-it-from-future-commits-is-it-gone-from-the-repo)
+  - [I committed. Is my work on GitHub now?](#i-committed-is-my-work-on-github-now)
+  - [My commit is missing files. How do I fix it?](#my-commit-is-missing-files-how-do-i-fix-it)
 
 ---
 
@@ -104,6 +114,104 @@ Recommended order:
 3. Directed corner-case tests, one per spec item.
 4. **Constrained random**, with weights (e.g. 70/30 write/read to push towards full, 30/70 towards empty).
 5. **Coverage last.** Coverage measured on a testbench that hasn't been checked yet only measures stimulus that nobody verified.
+
+### What is `convert2string()`, and is it needed?
+
+It's **not needed for the testbench to work**. It's for **logging and debugging**, and it's standard practice: almost every real UVM item overrides it.
+
+`convert2string()` is a method every `uvm_object` has. It returns a `string` describing the object, and **you decide what that string contains**. The default returns an empty string, so you override it:
+
+```d
+override string convert2string() {
+    return format("rst=%b wr=%b data=%02x rd=%b", rst, wr_en, wr_data, rd_en);
+}
+```
+
+`uvm_info` takes a **string**, so to log an item you have to turn it into one. UVM gives you two ways. This is real output from the same item:
+
+**`item.sprint()`**: automatic, from the `@UVM_DEFAULT` fields, as a table:
+```
+UVM_INFO ... [DRV] Driving:
+--------------------------------------
+Name       Type            Size  Value
+--------------------------------------
+req        probe.FifoItem  -     @139
+  wr_en                    1     false
+  rd_en                    1     true
+  wr_data  ubyte           8     0x89
+  rst                      1     false
+  rd_data  ubyte           8     0x00
+  ...                      (6 more lines)
+--------------------------------------
+```
+
+**`item.convert2string()`**: written by you, one line:
+```
+UVM_INFO ... [DRV] Driving: rst=0 wr=0 data=89 rd=1
+```
+
+| | `sprint()` / `print()` | `convert2string()` |
+|---|---|---|
+| Who writes it | UVM, automatically (from `@UVM_DEFAULT`) | You |
+| Shows | Every field, including outputs that aren't filled in yet | Only the fields you choose |
+| Size | ~17 lines per item | 1 line |
+| Best for | Inspecting one object in detail | Per-cycle logs (driver, monitor, scoreboard) |
+
+Why it matters here: the driver logs **one item per clock cycle**. A 5000-cycle random test is about 85 000 lines with `sprint()`, or 5000 with `convert2string()`. With one line per cycle, the log reads like a timeline, so you can spot the cycle where something went wrong and jump to that time in the waveform.
+
+Format codes used: `%b` prints a `bool` as `0`/`1`; `%02x` prints a number in hex, padded to 2 digits (`0x0a` prints as `0a`). `format` comes from `import std.format: format;`.
+
+### Does the order of the read data matter?
+
+**Yes. Order is the definition of a FIFO** (*First In, First Out*). SPEC §9.1: every accepted write is read back exactly once, **in the same order**, with the same value. A FIFO that returns all the right bytes in the wrong order is broken: whatever consumes the stream (a CPU reading a packet, a UART transmitter) gets corrupted data.
+
+This shapes the testbench:
+- The scoreboard model is a **queue**: push at the back on each accepted write, compare and pop at the front on each accepted read. A set or a bag of values would miss reordering bugs.
+- Directed tests use **distinct** data values (random or counting), so a reordering is visible. Writing `00` four times would hide it.
+
+### Why can't I use `$display`, and how do I log from a sequence?
+
+`$display` is a SystemVerilog system task. D has no `$` tasks: `$` is only valid inside `[ ]`, where it means "length of the array", so `$display(...)` fails with `found '$' instead of statement`.
+
+The UVM way to log is the **report macros**: `uvm_info`, `uvm_warning`, `uvm_error`, `uvm_fatal`:
+
+```d
+uvm_info("SEQ", format("write cycle, wr_data=%02x", req.wr_data), UVM_HIGH);
+//        ID     message (a string: build it with format)          verbosity
+```
+
+Compared with a plain print:
+
+| | `writeln` / `$display` | `uvm_info` |
+|---|---|---|
+| Timestamp, source file and line, component path | ❌ | ✅ `UVM_INFO fifo_seq.d(27) @ 140000: ...` |
+| Filter by verbosity (`+UVM_VERBOSITY=UVM_LOW` hides `UVM_HIGH` messages) | ❌ | ✅ |
+| Counted in the end-of-test summary | ❌ | ✅ (`uvm_error` counts are what make a test fail) |
+
+Use `UVM_LOW` for a few important messages per test, `UVM_MEDIUM` for per-transaction summaries, and `UVM_HIGH` for per-cycle detail. The makefile runs with `VERBOSITY=UVM_HIGH`; for a long random test, `make run VERBOSITY=UVM_LOW`.
+
+D details from the same review: booleans are lowercase **`true` / `false`**, and `0 .. 4` in `foreach (i; 0 .. 4)` means 0, 1, 2, 3.
+
+### Why build the driver side first, and the monitor and scoreboard later?
+
+They aren't skipped. They're **Milestone 2**, straight after the first waveform. The order is deliberate, and it's standard **bring-up** practice: add one layer at a time, and prove each layer before building on it.
+
+The testbench has two paths:
+
+```
+stimulus path:   sequence → sequencer → driver → DUT inputs          (Milestone 1)
+checking path:   DUT ports → monitor → scoreboard (reference model)  (Milestone 2)
+```
+
+| Reason | Explanation |
+|---|---|
+| **The checker is only as good as what it observes** | The scoreboard trusts the monitor, and the monitor trusts that the stimulus was what the sequence intended. If all three are new and the first run reports a mismatch, it could be the sequence, the driver, the monitor's sampling time, the model, or the DUT. Five suspects at once. |
+| **A waveform is an independent check** | With only the stimulus path, you check by eye: is `rst` high for 3 cycles, are there 4 writes then 4 reads, does `wr_ptr` step? The waveform doesn't depend on any testbench code being right. Once that looks right, the stimulus path is a **known-good** base. |
+| **The monitor depends on timing you should see first** | The monitor samples on the falling edge, and has to pair "inputs going into edge N" with "outputs after edge N". Seeing those relationships in a real waveform first makes the monitor much easier to write correctly. |
+| **Writing the expected values by hand is the scoreboard's design** | Predicting by hand what the smoke test should do (pointers, flags, which byte appears when) is exactly the reasoning the reference model will automate. Doing it once on 14 cycles makes the model's logic obvious. |
+| **Nothing runs without agent, env and test** | Those three are needed whatever comes next. The monitor lives inside the agent, and the scoreboard inside the env, so they slot into a structure that's already running. |
+
+Rule of thumb: **never debug two new things at once.** Each step should add one new thing, so when something breaks, there's one suspect.
 
 ---
 
@@ -342,6 +450,98 @@ The comparator didn't follow this. The FIFO testbench does, from the first file 
 
 Exception: names fixed by UVM or by generated code keep their own style (`uvm_test`, `uvm_config_db`, `DVsync_fifo`, `build_phase`).
 
+### Why does randomizing an item crash with `Illegal instruction`?
+
+It was observed on eUVM beta61 with this combination on the **same object**:
+
+```d
+class FifoItem: uvm_sequence_item {
+    @rand bool wr_en; ...
+    constraint! q{ wr_en dist [true := 7, false := 3]; } c_bias;   // class-level dist
+}
+...
+item.randomizeWith!q{ wr_en == false; }();                        // inline constraint
+```
+
+| Variant (tested in isolation) | Result |
+|---|---|
+| `randomize()`, no constraints | ✅ |
+| Class-level `dist` + `randomize()` | ✅ (ratio ≈ 0.70 over 1000 draws) |
+| `randomizeWith` without a class-level `dist` | ✅ |
+| `dist` written **inside** `randomizeWith` | ✅ (ratio ≈ 0.70) |
+| Class-level `dist` **+** `randomizeWith` | ❌ `Illegal instruction (core dumped)` |
+
+"Illegal instruction" is how a failed internal `assert` shows up in an optimised (`-O3`) build: the program stops with no UVM message.
+
+**Workaround, and also the better design:** keep the item free of weighting constraints. The item defines what's *legal*; sequences decide what's *likely*, with `randomizeWith!q{ wr_en dist [true := 7, false := 3]; }`. That way each sequence (fill-biased, drain-biased, balanced) chooses its own weights.
+
+General debugging lesson: when a crash has no message, **bisect**. Strip the failing code down to the smallest variant that still crashes, changing one thing at a time.
+
+### The compiler printed many errors. Where do I start?
+
+With the **first** one. D (like most compilers) keeps going after an error and reports what *follows from it*. Example from this project: one wrong line in `fifo_sequencer.d`:
+
+```d
+class FifoSeq : uvm_sequencer        // template used without a type parameter
+```
+
+produced four errors:
+
+```
+fifo_sequencer.d(5): Error: template class `uvm_sequencer(REQ = uvm_sequence_item, RSP = REQ)` is used as a type without instantiation ...
+uvm_component_defines.d(200): Error: function `...get_object_type` does not override any function
+uvm_component_defines.d(114): Error: mixin `...uvm_component_registry_mixin` error instantiating
+uvm_object_defines.d(261): Error: function `...get_type_name` does not override any function
+```
+
+Only the first is a real mistake: with no valid base class, the code generated by `mixin uvm_component_utils` has nothing to `override`. Fix line 5, and all four go away.
+
+Two more habits:
+- **Errors in your own file come first in importance.** An error reported inside `/tools/euvm/.../import/uvm/...` almost always means *your* code passed something wrong into the library.
+- `make 2>&1 | grep -A3 Error | head` shows only the first few errors, with 3 lines of context each. `2>&1` merges stderr (where errors go) into stdout so `grep` can see them.
+
+### How do `ubvec` values behave with integers and `format`?
+
+`ubvec!N` (esdl's N-bit unsigned bit vector) models hardware widths exactly, but it's **stricter than a plain integer**. Tested on eUVM beta61:
+
+| Code | Result |
+|---|---|
+| `ubvec!6 p = 63;` | ❌ compile error: `none of the overloads of 'this' are callable using argument types (int)` |
+| `ubvec!6 p = toubvec!6(63);` | ✅ |
+| `ubvec!6 q = p + 1;` | ❌ compile error: `p + 1` is a **32-bit** `ubvec` (it widens, like Verilog's expression sizing) |
+| `ubvec!6 q = cast(ubvec!6)(p + 1);` | ✅ q = 0 (truncated to 6 bits: wraps) |
+| `p += 1;` (p = 63) | ✅ p = 0, wraps 63 → 0 like a 6-bit register |
+| `format("%s", p)` | `3f` (hex by default) |
+| `format("%d", p)` | `63` |
+| `format("%2d", p)` with p = 5 | `5`: the **width is ignored** for `ubvec` |
+| `format("%2d", cast(uint) p)` | ` 5` (padded) |
+
+Rules of thumb: build a `ubvec` from a number with `toubvec!N(x)`, increment with `+=` to get hardware wrap-around, and `cast(uint)` when printing with a fixed width.
+
+### `get_next_item` or `try_next_item` in the driver?
+
+Both fetch the next item from the sequencer. The difference is **what happens when there isn't one**:
+
+| | `get_next_item(req)` | `try_next_item(req)` |
+|---|---|---|
+| No item available | **Blocks** until a sequence sends one | Returns at once with `req is null` |
+| Bus while waiting | Untouched: **the last values stay driven** | The driver drives what you choose (idle) |
+| Typical use | Transaction-level drivers (one item = a whole bus transfer, e.g. an APB write) | **Cycle-based** drivers (one item = one clock cycle), like this FIFO driver |
+
+The danger with `get_next_item` in a cycle-based driver: if the last item was a write (`wr_en=1`), `wr_en` stays high while the driver waits, and the DUT **writes on every edge**. Nothing in the log shows it, because no item is being driven. It looks like a DUT bug, but it's a testbench bug.
+
+Cycle-based pattern:
+
+```
+forever:
+    wait(vif.clock.posedge())
+    seq_item_port.try_next_item(req)
+    if (req is null)  drive idle
+    else              drive req; seq_item_port.item_done()
+```
+
+Waiting for the edge **before** asking for an item matters too: the driver then decides something for **every** cycle, and never skips one.
+
 ### How do I print the value of a `VlPort`?
 
 Call `.read()`:
@@ -368,6 +568,38 @@ git commit -m "Stop tracking <file>"
 ```
 
 `--cached` is the important flag: without it, `git rm` also deletes the file from disk.
+
+### I committed. Is my work on GitHub now?
+
+No. `git commit` and `git push` are separate steps:
+
+| Step | What it does | Where the data ends up |
+|---|---|---|
+| Edit files | Changes the working files | The project folder on the machine you work on (here, the server `inc-hq-server4`) |
+| `git commit` | Saves a snapshot **locally** | The `.git/` folder in that same project, still on the same machine |
+| `git push` | Uploads commits to a **remote** | The remote's server (e.g. GitHub), only if a remote is configured |
+
+`git remote -v` lists the configured remotes. If it prints nothing, there's nowhere to push to, and `git push` fails with `fatal: No configured push destination.` A remote is added once, e.g. `git remote add origin git@github.com:<user>/<repo>.git`, and after that `git push` uploads to it.
+
+### My commit is missing files. How do I fix it?
+
+First check what a commit contains:
+
+```bash
+git show --stat HEAD        # files changed in the last commit
+git status --short          # what's still uncommitted: ?? = untracked, M = modified, A = staged new file
+```
+
+A common cause is running `git add` from a **subdirectory**: paths are relative to where you are, so from `sim/`, `git add testbench/` matches nothing. Run git from the repo root, or check with `git status` before committing.
+
+If the commit **hasn't been pushed**, fix it rather than adding a "forgot some files" commit:
+
+```bash
+git add <missing files>
+git commit --amend -m "corrected message"
+```
+
+`--amend` replaces the last commit with one that contains the old contents **plus** what's now staged. It can also fix the message. The commit gets a new hash. **Only amend unpushed commits**: rewriting a commit that others have already pulled makes their history diverge from yours.
 
 ### Untracking a file hides it from future commits. Is it gone from the repo?
 
