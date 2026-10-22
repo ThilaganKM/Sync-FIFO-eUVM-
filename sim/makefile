@@ -42,8 +42,11 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
 
 all: $(TOP)
 
+# stdbuf -oL: line-buffer stdout. UVM messages go to stdout (block-buffered
+# when piped, e.g. into tee) and ESDL kernel messages go to stderr (unbuffered);
+# without this, the two streams interleave out of order in the terminal/log.
 run: $(TOP)
-	./$(TOP) +UVM_TESTNAME=$(TEST) +UVM_VERBOSITY=$(VERBOSITY) +seed=$(SEED)
+	stdbuf -oL ./$(TOP) +UVM_TESTNAME=$(TEST) +UVM_VERBOSITY=$(VERBOSITY) +seed=$(SEED)
 
 clean:
 	rm -rf $(TOP) $(TOP).o *.vcd euvm_dir obj_dir verilator.stamp

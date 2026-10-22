@@ -33,10 +33,12 @@ Nothing here gives away anything about bugs in the RTL.
   - [How do `ubvec` values behave with integers and `format`?](#how-do-ubvec-values-behave-with-integers-and-format)
   - [`get_next_item` or `try_next_item` in the driver?](#get_next_item-or-try_next_item-in-the-driver)
   - [How do I print the value of a `VlPort`?](#how-do-i-print-the-value-of-a-vlport)
+  - [Why did "Simulation Complete" appear in the middle of my log, before the last cycles?](#why-did-simulation-complete-appear-in-the-middle-of-my-log-before-the-last-cycles)
 - [Git](#git)
   - [I added a file to `.gitignore` but git still tracks it. Why?](#i-added-a-file-to-gitignore-but-git-still-tracks-it-why)
   - [Untracking a file hides it from future commits. Is it gone from the repo?](#untracking-a-file-hides-it-from-future-commits-is-it-gone-from-the-repo)
   - [I committed. Is my work on GitHub now?](#i-committed-is-my-work-on-github-now)
+  - [Do I need to push after every commit? Are unpushed commits safe?](#do-i-need-to-push-after-every-commit-are-unpushed-commits-safe)
   - [My commit is missing files. How do I fix it?](#my-commit-is-missing-files-how-do-i-fix-it)
 
 ---
@@ -553,6 +555,41 @@ writeln(vif.wr_ptr);            // esdl.intf.verilator.verilated.VlPortObj!(...)
 
 `writeln` / `format` print the port **object** unless you ask for its value. In assignments and comparisons (`item.wr_ptr = vif.wr_ptr;`, `if (vif.full)`), eUVM converts the port to its value for you.
 
+### Why did "Simulation Complete" appear in the middle of my log, before the last cycles?
+
+Because the simulator writes to **two output streams**, and they're buffered differently:
+
+| Messages | Stream | Buffering when piped (`\| tee`, `\| grep`, `> file`) |
+|---|---|---|
+| `UVM_INFO ...` (all UVM reports) | stdout | **Block-buffered**: written out in ~4 KB chunks |
+| `[ESDL!tb] Starting Phase ...`, `Shutting down ...`, `Simulation Complete` | stderr | **Unbuffered**: written immediately |
+
+So the ESDL shutdown lines (stderr) reached the terminal **immediately** at the end of the run, while the last ~4 KB of UVM messages (stdout) were still sitting in the buffer. They were flushed **after** them, splitting a `[DRV]` line in half:
+
+```
+UVM_INFO ... @ 210000: ...driver [DRV] rst=0 wr=0 rd=1 wdata=00 | rdata=00 wptr=00 [ESDL!tb] Shutting down all the Routine threads
+[ESDL!tb] Shutting down all the active Tasks
+[ESDL!tb] Simulation Complete
+rptr=00 full=0 empty=0 werr=0 rerr=0
+UVM_INFO ... @ 230000: ...sequencer@@seq [SEQ] idle cycle 0
+```
+
+Nothing was wrong with the simulation. The evidence was in the report summary: `[SEQ] 14` and `[DRV] 14`, so all 14 cycles, the idle ones included, ran, and the report itself is stamped `@ 310000` (the last idle cycle at 270 ns + 40 ns drain).
+
+Ways to check this kind of thing:
+- `2>/dev/null` drops stderr: the `[ESDL!tb]` lines disappear, which shows they're on stderr.
+- The **report counts by id** at the end are the ground truth for "did everything run?".
+
+**Fix:** the makefile's `run` target uses `stdbuf -oL`, which makes stdout **line-buffered** (flushed at every newline), so both streams come out in true order. To capture both streams in a log file, redirect stderr too:
+
+```bash
+make run 2>&1 | tee run.log
+```
+
+`2>&1` sends stderr (stream 2) wherever stdout (stream 1) goes, so `tee` sees both. Without it, `run.log` only contains the UVM messages.
+
+**Lesson:** the order of lines in a log isn't automatically the order of events. Trust the **timestamps** (`@ 230000`) and the summary counts over the line order.
+
 ---
 
 ## Git
@@ -580,6 +617,28 @@ No. `git commit` and `git push` are separate steps:
 | `git push` | Uploads commits to a **remote** | The remote's server (e.g. GitHub), only if a remote is configured |
 
 `git remote -v` lists the configured remotes. If it prints nothing, there's nowhere to push to, and `git push` fails with `fatal: No configured push destination.` A remote is added once, e.g. `git remote add origin git@github.com:<user>/<repo>.git`, and after that `git push` uploads to it.
+
+### Do I need to push after every commit? Are unpushed commits safe?
+
+Commits are **complete and permanent locally** as soon as they're made: message, author, date and parent are all stored in `.git/`. When you eventually `git push`, git uploads **every** commit made so far, in order, with the original dates, so the history on GitHub looks the same whether you pushed daily or once at the end.
+
+| | Push now, to a **private** repo | Push only at the end |
+|---|---|---|
+| History on GitHub | Identical | Identical |
+| Backup | ✅ A second copy off the work machine | ❌ A single copy (and `/scratch` filesystems are often not backed up) |
+| Free to `--amend` / rebase | Only commits not yet pushed | ✅ Everything |
+
+Recommended: **create the GitHub repo as Private, push early and often, and make it public when it's ready.** Once a commit is pushed, don't amend or rebase it (that would need a force-push). Fix things with a new commit.
+
+First push of an existing local repo:
+
+```bash
+git branch -m master main                                  # rename branch to GitHub's default
+git remote add origin git@github.com:<user>/<repo>.git     # register the remote (SSH)
+git push -u origin main                                    # upload; -u remembers the pairing for later pushes
+```
+
+Create the GitHub repo **empty** (no README, license or .gitignore), otherwise its first commit conflicts with your local history.
 
 ### My commit is missing files. How do I fix it?
 
