@@ -4,7 +4,41 @@ import uvm;
 import fifo_item;
 import std.format : format;
 
-class FifoSmokeSeq : uvm_sequence!FifoItem
+// ---------------------------------------------------------------------------
+// FifoBaseSeq: common helpers shared by every FIFO sequence.
+// Every directed sequence extends this class, so its body() can be written as
+// one line per phase of the test plan, e.g.
+//     doReset(3); doWrites(64); doWrites(1); doReads(64);
+// ---------------------------------------------------------------------------
+class FifoBaseSeq : uvm_sequence!FifoItem
+{
+    mixin uvm_object_utils;
+    this(string name="FifoBaseSeq"){super(name);}
+
+    // Sends ONE clock cycle: create -> start_item -> randomize (random wr_data)
+    // -> set rst/wr_en/rd_en explicitly -> log -> finish_item (blocks until the
+    // driver has driven it). Every cycle goes through this one code path.
+    void doCycle(bool rst, bool wr, bool rd, string what)
+    {
+        req = FifoItem.type_id.create("req");   // req: declared by uvm_sequence
+        start_item(req);
+        req.randomize();
+        req.rst   = rst;
+        req.wr_en = wr;
+        req.rd_en = rd;
+        uvm_info("SEQ", format("%s, wr_data=%02x", what, req.wr_data), UVM_HIGH);
+        finish_item(req);
+    }
+
+    //                                              rst    wr     rd
+    void doReset(int n)     { foreach (i; 0 .. n) doCycle(true,  false, false, format("reset cycle %d", i)); }
+    void doWrites(int n)    { foreach (i; 0 .. n) doCycle(false, true,  false, format("write cycle %d", i)); }
+    void doReads(int n)     { foreach (i; 0 .. n) doCycle(false, false, true,  format("read cycle %d", i)); }
+    void doReadWrite(int n) { foreach (i; 0 .. n) doCycle(false, true,  true,  format("read+write cycle %d", i)); }
+    void doIdle(int n)      { foreach (i; 0 .. n) doCycle(false, false, false, format("idle cycle %d", i)); }
+}
+
+class FifoSmokeSeq : FifoBaseSeq
 {
     mixin uvm_object_utils;
     this(string name="FifoSmokeSeq"){super(name);}
@@ -53,30 +87,7 @@ class FifoSmokeSeq : uvm_sequence!FifoItem
     }
 
     // ---------------------------------------------------------------------
-    // ALTERNATIVE: the same body() using a helper method.
-    // doCycle() sends ONE clock cycle: create -> start_item -> randomize
-    // (random wr_data) -> set rst/wr_en/rd_en -> log -> finish_item.
-    // Every cycle goes through the same code, so the loops can't drift apart
-    // by copy-paste, and the enables are always set explicitly.
+    // ALTERNATIVE: the same body() written with the FifoBaseSeq helpers:
+    //     override void body() { doReset(3); doWrites(4); doReads(4); doIdle(3); }
     // ---------------------------------------------------------------------
-    // override void body()
-    // {
-    //     //                          rst    wr     rd
-    //     foreach (i; 0 .. 3) doCycle(true,  false, false, format("reset cycle %d", i));
-    //     foreach (i; 0 .. 4) doCycle(false, true,  false, format("write cycle %d", i));
-    //     foreach (i; 0 .. 4) doCycle(false, false, true,  format("read cycle %d", i));
-    //     foreach (i; 0 .. 3) doCycle(false, false, false, format("idle cycle %d", i));
-    // }
-    //
-    // void doCycle(bool rst, bool wr, bool rd, string what)
-    // {
-    //     req = FifoItem.type_id.create("req");   // req: declared by uvm_sequence
-    //     start_item(req);
-    //     req.randomize();
-    //     req.rst   = rst;
-    //     req.wr_en = wr;
-    //     req.rd_en = rd;
-    //     uvm_info("SEQ", format("%s, wr_data=%02x", what, req.wr_data), UVM_HIGH);
-    //     finish_item(req);
-    // }
 }

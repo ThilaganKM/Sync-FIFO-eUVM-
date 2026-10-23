@@ -601,3 +601,19 @@ D details used: `expected ~= x` (append), `expected = expected[1 .. $]` (drop th
    ...  mismatches=2        UVM_ERROR :    2
    ```
    Both caught. The `rd_data` sampled at **180** ns is reported at **200** ns: the read is checked when the snapshot **after** the consuming edge arrives. Reading reports this way (error time = one sample after the cause) matters when debugging.
+
+---
+
+## Base test and base sequence (set up by the reviewer, existing behaviour unchanged)
+
+| File | Change |
+|---|---|
+| `fifo_seq.d` | New **`FifoBaseSeq`**: `doCycle(rst, wr, rd, what)` plus phase helpers `doReset(n)`, `doWrites(n)`, `doReads(n)`, `doReadWrite(n)`, `doIdle(n)`. `FifoSmokeSeq` now extends `FifoBaseSeq`. **Its own `body()` is unchanged.** The old commented alternative became a one-line pointer: `doReset(3); doWrites(4); doReads(4); doIdle(3);`. |
+| `fifo_test.d` | New **`FifoBaseTest`**: builds `env`, and its `run_phase` starts the sequence returned by **`createSeq()`** (raise objection → `start` → drop, 40 ns drain). `FifoTest` now extends it and only overrides `createSeq()` to return `FifoSmokeSeq`. Running `FifoBaseTest` itself stops with `UVM_FATAL [TEST] FifoBaseTest runs no sequence`. |
+
+Design: the **template method** pattern. The base class owns the fixed procedure (build env, objections, start, drain), and each test fills in the one part that varies (which sequence). A new test is 5 lines, and the objection/drain logic exists once.
+
+Verified (scratch build):
+- `make run` (FifoTest): unchanged, `edges_checked=14 data_checks=4 mismatches=0`.
+- `make run TEST=fifo_test.FifoBaseTest`: `FATAL ... FifoBaseTest runs no sequence`, as intended.
+- The helper version of the smoke body gives the **same control, pointers and flags** in all 28 DRV/MON lines, and still 0 mismatches, but **different data bytes**. `doCycle` calls `randomize()` on every cycle (reset, read and idle cycles too), while the original loops only randomize write cycles, so the random stream is consumed differently. Both are correct, because `wr_data` is a don't-care when `wr_en = 0`. Lesson: "same seed" only reproduces a run if the stimulus code consumes random numbers in the **same order**. Changing the stimulus code changes the values.
