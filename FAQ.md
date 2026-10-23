@@ -9,10 +9,18 @@ Nothing here gives away anything about bugs in the RTL.
   - [When does the read data appear? Same edge as `rd_en`?](#when-does-the-read-data-appear-same-edge-as-rd_en)
   - [Should the monitor send separate read and write events?](#should-the-monitor-send-separate-read-and-write-events)
   - [Should the scoreboard mirror the FIFO memory, address by address?](#should-the-scoreboard-mirror-the-fifo-memory-address-by-address)
+  - [Scoreboard: a mirror of the FIFO memory, or check inside the real FIFO?](#scoreboard-a-mirror-of-the-fifo-memory-or-check-inside-the-real-fifo)
+  - [When does the FIFO wrap around? Do the pointers go back to 0 when `rd_ptr == wr_ptr`?](#when-does-the-fifo-wrap-around-do-the-pointers-go-back-to-0-when-rd_ptr--wr_ptr)
+  - [When is a write rejected? What happens when `wr_ptr` reaches 63?](#when-is-a-write-rejected-what-happens-when-wr_ptr-reaches-63)
+  - [After a wrap, `wr_ptr < rd_ptr`. Isn't that a problem?](#after-a-wrap-wr_ptr--rd_ptr-isnt-that-a-problem)
+  - [Should the scoreboard decide "write accepted?" from the DUT's `full` flag?](#should-the-scoreboard-decide-write-accepted-from-the-duts-full-flag)
+  - [The scoreboard reports 0 mismatches. How do I know it actually works?](#the-scoreboard-reports-0-mismatches-how-do-i-know-it-actually-works)
   - [Random tests, stress tests, coverage, assertions: where do I start?](#random-tests-stress-tests-coverage-assertions-where-do-i-start)
   - [What is `convert2string()`, and is it needed?](#what-is-convert2string-and-is-it-needed)
   - [Does the order of the read data matter?](#does-the-order-of-the-read-data-matter)
   - [Why can't I use `$display`, and how do I log from a sequence?](#why-cant-i-use-display-and-how-do-i-log-from-a-sequence)
+  - [`rd_data` changed but `rd_ptr` didn't. Is that a timing bug?](#rd_data-changed-but-rd_ptr-didnt-is-that-a-timing-bug)
+  - [When the FIFO is empty, does `rd_data` show the last value read?](#when-the-fifo-is-empty-does-rd_data-show-the-last-value-read)
   - [Why build the driver side first, and the monitor and scoreboard later?](#why-build-the-driver-side-first-and-the-monitor-and-scoreboard-later)
 - [Verification plan](#verification-plan)
   - [How was the verification plan derived from my scenario list?](#how-was-the-verification-plan-derived-from-my-scenario-list)
@@ -101,6 +109,98 @@ Per edge, the model:
 4. predicts `full`, `empty`, `wr_ptr`, `rd_ptr`, `wr_err` and `rd_err`, and compares them with the next snapshot.
 
 The pointers **are** checked, because `wr_ptr` and `rd_ptr` are output ports: the model keeps its own counters for them.
+
+### Scoreboard: a mirror of the FIFO memory, or check inside the real FIFO?
+
+Neither. The standard choice is a **reference model that predicts the DUT's port behaviour**, compared against what the monitor observes **at the ports**.
+
+| Option | What it means | Verdict |
+|---|---|---|
+| **Check inside the real FIFO** (white-box / backdoor) | Read the DUT's internal `mem[]` array and compare it with what was written | ❌ **Checks the DUT against itself.** The storage is internal: SPEC §2 calls the structure an implementation choice, so the testbench would break on a legal redesign (an SRAM macro, a different pointer scheme). It also proves nothing about what a *user* of the FIFO sees: a correct `mem[]` with a wrong `rd_ptr` or wrong flags still fails the spec. (With Verilator, internal signals aren't even visible to the testbench unless the RTL marks them public.) |
+| **Mirror memory** (a 64-entry array indexed by model pointers) | Copy the DUT's structure in the testbench | ⚠️ Possible, but it re-implements the design. If the model copies the designer's structure, it tends to copy the designer's mistakes too. |
+| **Queue model** + model pointers and flags (black-box) | `ubyte[] expected`: push on an accepted write, compare and pop on an accepted read; model `wrPtr`/`rdPtr` and predicted flags | ✅ **Industry standard.** It's written from the **spec** (behaviour), not from the RTL (structure). Order checking comes free with the queue (FIFO = queue), and every check is on a **port**, which is what the spec defines and what a user observes. |
+
+This also answers "how do I know which slot was written?": you don't need to. The spec's observable promises are *order*, *values*, *flags*, *pointers* and *error pulses*, and the queue model plus the pointer counters check every one of them.
+
+### When does the FIFO wrap around? Do the pointers go back to 0 when `rd_ptr == wr_ptr`?
+
+No. Two separate things often get mixed up:
+
+| | What it means | When it happens |
+|---|---|---|
+| **Wrap-around** | A pointer goes from slot **63 to slot 0** | Each pointer **independently**, when *it* advances past 63 (SPEC §4). The data stays where it is. |
+| **`rd_ptr == wr_ptr`** | The FIFO is **empty or full** (SPEC §2 note: `full`/`empty` tell the two apart) | After the last read (empty), or after the 64th unread write (full). **Nothing moves.** |
+
+The smoke test shows it: after 4 writes and 4 reads, the log has `wptr=04 rptr=04 empty=1`. The pointers are equal and **stay at 4**, and the next write goes to slot 4. Only **reset** puts the pointers back to 0.
+
+In the model: keep `wrPtr`/`rdPtr` as `ubvec!6` and do `+= 1` on each accepted operation. 63 + 1 = 0 happens on its own, with no special case.
+
+### When is a write rejected? What happens when `wr_ptr` reaches 63?
+
+A write at slot 63 **wraps**: `wr_ptr` goes to 0, and writing continues at slot 0. A write is rejected only when the FIFO holds **64 unread entries**, whatever the pointer values.
+
+Example: `rd_ptr = 3`, `wr_ptr = 9` (6 entries in slots 3–8; slots 0–2 were already read), then writes with no reads:
+
+| Write # | Slot written | `wr_ptr` after | Entries | `full` | Result |
+|---|---|---|---|---|---|
+| 1 | 9 | 10 | 7 | 0 | accepted |
+| 55 | 63 | **0** (wrap, §4) | 61 | 0 | accepted |
+| 56 | 0 | 1 | 62 | 0 | accepted: reuses a slot that was already read |
+| 58 | 2 | **3** = `rd_ptr` | **64** | **1** | accepted: now full |
+| 59 | – | 3 | 64 | 1 | **rejected**: slot 3 still holds the oldest unread entry (a full FIFO never overwrites, §4); `wr_err` pulses |
+
+When each request is rejected (FIFO state **before** the edge):
+
+| Request | Rejected when | Result | SPEC |
+|---|---|---|---|
+| Write | full, and no read on the same edge | nothing stored, `wr_ptr` unchanged, `wr_err` high for one cycle after the edge | §4, §7 |
+| Write | full, **with** a read on the same edge | **accepted** (the read frees a slot), no error | §6 |
+| Read | empty | `rd_ptr` unchanged, `rd_err` high for one cycle after the edge | §5, §7 |
+| Read | empty, **with** a write on the same edge | **still rejected** (no write-through); `rd_err` pulses | §5, §6 |
+| Any | `rst = 1` | ignored, **no** error | §3 |
+
+Equal pointers mean empty **or** full: `wr_ptr = rd_ptr = 3` above has 64 entries, while `wr_ptr = rd_ptr = 4` after the smoke test has 0. That's why the spec has both flags, and why the scoreboard model tracks the **count** (`expected.length`), not the pointer difference.
+
+### After a wrap, `wr_ptr < rd_ptr`. Isn't that a problem?
+
+No, it's normal for a **circular** buffer. The 64 slots form a ring (slot 63 is followed by slot 0). The valid entries run **forward from `rd_ptr`**, wrapping past 63, up to the slot before `wr_ptr`. Example: `rd_ptr = 3`, `wr_ptr = 1`, 62 entries:
+
+```
+slot:   0    1    2    3    4   ...   62   63
+        ■    □    □    ■    ■   ...   ■    ■
+        ↑    ↑         ↑
+     newest wr_ptr   rd_ptr (oldest)
+read order:  3 → 4 → … → 63 → 0
+```
+
+`rd_ptr` wraps too when it passes 63, so the two pointers take turns being numerically larger.
+
+What **does** break is treating pointers as plain numbers:
+
+| Calculation | `wr=9, rd=3` | `wr=1, rd=3` (after wrap) |
+|---|---|---|
+| `wr_ptr > rd_ptr` means "has data"? | true ✅ | false ❌ (62 entries) |
+| `count = wr_ptr - rd_ptr` (signed `int`) | 6 ✅ | −2 ❌ |
+| `count = (wr_ptr - rd_ptr) mod 64` (6-bit unsigned) | 6 ✅ | 62 ✅ |
+| `count = expected.length` (queue model) | 6 ✅ | 62 ✅ |
+
+Only modulo-64 arithmetic is valid, and even it can't tell **0 from 64** (both give a difference of 0). That's why `full` and `empty` exist. Comparing or subtracting ring pointers as ordinary numbers is a classic FIFO bug in RTL and testbenches alike. The scoreboard avoids it completely: decisions use `expected.length`, and the model pointers (`ubvec!6`, wrapping like the hardware) are only **compared** with the DUT's.
+
+### Should the scoreboard decide "write accepted?" from the DUT's `full` flag?
+
+No. **The model decides from its own state**: "accepted" means `count < 64` (or a simultaneous read), with `count = expected.length`. Then it compares the DUT's `full` with its own prediction.
+
+If the model used the DUT's `full` to decide, it would **trust the thing it's checking**. A DUT with a wrong `full` flag would make the model accept or reject exactly as the DUT did, and the two would always agree. Rule: **DUT outputs are only ever compared, never used to drive the model.** The inputs (`wr_en`, `rd_en`, `wr_data`, `rst`) are the only DUT-side values the model consumes.
+
+### The scoreboard reports 0 mismatches. How do I know it actually works?
+
+Make it **fail on purpose**. A checker that has never reported an error is untested: it might be comparing a value with itself, checking nothing, or never being called. Three habits:
+
+1. **Read the counts, not just the error total.** The scoreboard's report line is `samples=15 edges_checked=14 data_checks=4 writes=4 reads=4 left_in_fifo=0 mismatches=0`. Do the numbers make sense for the test? (4 writes and 4 reads in the smoke test; every pair of consecutive samples checked.) The scoreboard also raises an error if `edges_checked` is 0.
+2. **Fault injection.** Temporarily corrupt what the checker sees, e.g. in the monitor: `if (getSimTime().getVal() == 180000) item.rd_data ^= 0x01;`, and confirm a mismatch is reported. Then **remove** it. (Do this in a scratch copy, or revert it right away, so it can never be committed.)
+3. **Know where the error will appear.** A wrong `rd_data` sampled at 180 ns is reported at **200 ns**, because the read is checked when the snapshot after the consuming edge arrives. The real cause is usually **one sample before** the reported time.
+
+In industry, this is the difference between "the test passed" and "the test **can** fail". Checkers are verified too.
 
 ### Random tests, stress tests, coverage, assertions: where do I start?
 
@@ -194,6 +294,29 @@ Compared with a plain print:
 Use `UVM_LOW` for a few important messages per test, `UVM_MEDIUM` for per-transaction summaries, and `UVM_HIGH` for per-cycle detail. The makefile runs with `VERBOSITY=UVM_HIGH`; for a long random test, `make run VERBOSITY=UVM_LOW`.
 
 D details from the same review: booleans are lowercase **`true` / `false`**, and `0 .. 4` in `foreach (i; 0 .. 4)` means 0, 1, 2, 3.
+
+### `rd_data` changed but `rd_ptr` didn't. Is that a timing bug?
+
+No. It's show-ahead behaviour (SPEC §5), and it confuses almost everyone the first time. From the smoke test:
+
+```
+time (ns)      150            160 (MON)             170            180 (MON)
+event       rising edge      sample              rising edge      sample
+DUT         writes d2        rptr=0, rdata=18    CONSUMES 18      rptr=1, rdata=59
+driver      drives rd=1 ─────────────────────────► (acted on here)
+```
+
+- `rd_data` is **combinational**: it always shows `mem[rd_ptr]`, the **oldest** entry. It doesn't wait for `rd_en`.
+- `rd_en` doesn't *fetch* data; it **consumes** the entry already on `rd_data`, at the next rising edge. So in the sample where `rd=1` is first seen, `rptr` is still the old value and `rdata` is the byte **about to be consumed**.
+- After that edge, `rptr` advances and `rdata` moves to the next entry.
+
+So the byte a read takes is **the `rdata` in the snapshot where `rd=1`**, not the one after it. SPEC §5: *"The value read is the value of `rd_data` just before that edge."* A standard (non-show-ahead) FIFO is different: there, `rd_data` updates one cycle **after** `rd_en`.
+
+A related rule for any testbench: **never add idle cycles to the stimulus to make the checker's job easier.** If back-to-back traffic looks confusing in the log, the fix is in your understanding or your model, not in the stimulus. Back-to-back traffic is exactly what the DUT has to handle.
+
+### When the FIFO is empty, does `rd_data` show the last value read?
+
+No. `rd_data` shows **whatever is stored at `rd_ptr`**. After the last read, `rd_ptr` points at the next slot, which may never have been written (`00` in Verilator), or may hold data from **before a reset** or from a **previous lap** around the circular buffer. That last case looks like valid data. SPEC §3/§5: `rd_data` is **undefined while `empty`**, so the scoreboard compares `rd_data` **only when its model says the FIFO isn't empty**.
 
 ### Why build the driver side first, and the monitor and scoreboard later?
 

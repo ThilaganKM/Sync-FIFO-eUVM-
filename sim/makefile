@@ -15,6 +15,7 @@ TB_SRC  = ../testbench/$(TOP).d \
           ../testbench/fifo_seq.d \
           ../testbench/fifo_driver.d \
           ../testbench/fifo_monitor.d \
+          ../testbench/fifo_scoreboard.d \
           ../testbench/fifo_agent.d \
           ../testbench/fifo_env.d \
           ../testbench/fifo_test.d

@@ -481,3 +481,123 @@ The author fixed #1–#6 ✅ (port type, `rst` sampled, `super.build_phase`, the
 | 43 | Added `uvm_info("MON", item.convert2string(), UVM_HIGH);` | Suggestion #7, one line per sample with real DUT outputs |
 
 Scratch run of the smoke test: builds, `UVM_FATAL : 0`, `UVM_ERROR : 0`, **15 `[MON]` lines** (one per negedge, 20 ns … 300 ns). The analysis port has no subscriber yet, which is legal: `write()` to an unconnected analysis port simply delivers to nobody.
+
+---
+
+## Design review: reading the monitor log like a scoreboard
+
+Five questions about the smoke test's MON lines (the `make view` output, cycles c003–c011), answered **before** the scoreboard was written. The answers become the reference model's rules.
+
+| Q | Answer given | Review |
+|---|---|---|
+| 1. Which edge lies between c003's inputs and c004's outputs, and what did it do? | "The edge at 70 ns. The write happened: `wptr` +1, `empty` → 0, `rdata` = 18 (show-ahead)." | Evidence ✅, edge ❌. At **70 ns** the DUT evaluated its edge *first*, and only then did the driver put `wr=1, wdata=18` on the bus. The edge that **acts on** those inputs is the **next** one, at **90 ns**, between MON@80 (c003) and MON@100 (c004). Rule: *inputs driven at edge N are consumed at edge N+1.* |
+| 2. `rdata=18` at c004 with no read yet: bug? | "Not a bug: show-ahead (combinational) read port." | ✅ SPEC §5: `rd_data` always shows the entry at `rd_ptr`, before `rd_en`. Precisely: it appears **after** the write edge (90 ns), not on it. That's "no write-through" (§5). |
+| 3. c007 requests a read with `rdata=18`. What does the next edge consume, and what shows it? | Suspected a timing problem: c007 seems to show `wptr` from c006's inputs but `rdata` from c007's inputs. `rptr` is still 0 even though `rdata=18`. Proposed inserting idle cycles. | ❌ No timing issue. **`rdata` doesn't depend on c007's inputs at all.** It's `mem[rd_ptr]`, and it has been `18` since c004. In c007, **nothing has been read yet**: the read requested there happens at the **next** edge (170 ns). So `rptr=0` is correct, and `rdata=18` is the value **about to be consumed** (SPEC §5: *"the value read is the value of `rd_data` just before that edge"*). The evidence is in c008: `rptr` 0→1 and `rdata` → `59` (the next entry). See the timeline below. **Don't insert idle cycles:** never change the stimulus to make the checker's job easier. Back-to-back traffic is exactly what the DUT has to handle, and the plan's tests depend on it. |
+| 4. Is every byte read back exactly once, in order? | "Yes, cycles 7–10." | ✅ The bytes consumed are the `rdata` values in the snapshots with `rd=1`: c007 `18`, c008 `59`, c009 `d3`, c010 `d2` = the write order. |
+| 5. `rdata=00` at c011: failure? | "No: the FIFO is empty, so no valid read. Doesn't `rdata` show the last read data?" | ✅ Not a failure. Correction: `rdata` doesn't hold "the last read data". It shows **whatever is in the slot at `rd_ptr`** (slot 4 here, never written, so `00` in Verilator). After a reset or a wrap-around, that slot can hold **old data that looks valid**. SPEC §3/§5: `rd_data` is **undefined while `empty`**, so the scoreboard **must not compare it** then. |
+| Bonus: what must the model remember? | "Track the timing between driver and monitor: pointers, rdata, wdata, rst, all signals." | Too broad. A model keeps **only the state it can't recompute**, and **predicts** everything else from it. See below. |
+
+### The timeline behind Q3
+
+```
+time (ns)      150            160 (c007 MON)        170            180 (c008 MON)
+event       rising edge      sample              rising edge      sample
+DUT         writes d2        rptr=0, rdata=18    CONSUMES 18      rptr=1, rdata=59
+driver      drives rd=1 ─────────────────────────► (acted on here)
+```
+
+In one snapshot, the **left half** (inputs) belongs to the *next* edge, and the **right half** (outputs) to the *previous* edge. `rdata` is a right-half value that also tells you what the next edge will consume. That's show-ahead, by design, not a race.
+
+### Minimal reference-model state
+
+| Model variable | Type | Updated when | Used to predict / check |
+|---|---|---|---|
+| `expected` | `ubyte[]` (queue) | push `wr_data` on an accepted write, pop on an accepted read | `rd_data` = `expected[0]` (only when non-empty); `count` = `expected.length` → `empty`, `full` |
+| `wrPtr`, `rdPtr` | `ubvec!6` | `+= 1` on accepted write / read; 0 on reset | `wr_ptr`, `rd_ptr` |
+| `expWrErr`, `expRdErr` | `bool` | set from the reject decision on each edge | `wr_err`, `rd_err` in the **next** snapshot |
+| `prev` | `FifoItem` | every snapshot | pairs the previous snapshot's inputs with this snapshot's outputs |
+| check counters | `int` | every comparison | end-of-test report (checks == cycles) |
+
+Not state: `wr_data` and `rst` are **inputs**, read fresh from each snapshot. `rd_data`, `empty` and `full` are **derived** from the queue, so storing them separately would only give a second copy that can drift out of sync.
+
+---
+
+## Design review: the scoreboard algorithm (first draft)
+
+> *"For every reset, check `empty=1`, `full=0` and both pointers 0. For every write, first check it's valid (`full != 1`), then push it into `mem[wr_ptr]`. For every read, check it's valid (`empty != 1`), then pop from `mem[rd_ptr]`. Wrap-around only happens when `rd_ptr == wr_ptr`: the pointers go to 0 and the next data is stored from index 0, so the FIFO mimics reset behaviour. I hope the RTL was written that way."*
+
+What's right: a reset check with the right expected values (CHK-07), and the idea of accepting or rejecting each request before updating the model.
+
+| # | Sev. | Issue | Why it matters | Fix |
+|---|---|---|---|---|
+| 1 | 🔴 | **Wrap-around misunderstood** | SPEC §4: each pointer wraps **independently**, from 63 to 0, **when it advances past 63**. `rd_ptr == wr_ptr` means **empty or full** (SPEC §2 note), not "wrap", and nothing resets. The smoke test's own log shows it: after the last read, **c011: `wptr=04 rptr=04 empty=1`**. The pointers are equal and stay at 4. The next write goes to slot 4, not 0. | Model pointers as `ubvec!6` and `+= 1` on each accepted operation: 63 + 1 = 0 automatically (FAQ). No special case. |
+| 2 | 🔴 | Acceptance decided from the **DUT's** `full` / `empty` | This makes the checker trust the thing it checks. If the DUT's `full` were wrong, the model would accept or reject exactly as the DUT did and agree with it. **The model must decide from its own state** (`expected.length`), then compare the DUT's flags against that. | `wrAcc` / `rdAcc` from the model's count |
+| 3 | 🔴 | Simultaneous read + write missing | SPEC §6: at **full**, a write **is** accepted when a read happens on the same edge. At **empty**, the read is **rejected** even though a write happens (no write-through). "Write valid if not full" gets the first case wrong. | `wrAcc = wr_en && (count < 64 \|\| rd_en)`; `rdAcc = rd_en && count > 0` |
+| 4 | 🔴 | **No data comparison** | The algorithm pops data but never **compares** it with what the DUT returned. That's CHK-01, the main purpose of the scoreboard. | On an accepted read, compare the **pre-edge** `rd_data` (in `prev`) with `expected[0]`, *then* pop |
+| 5 | 🔴 | Flags, pointers and error pulses only checked at reset | CHK-03/04/05 must hold **after every edge**: `empty`/`full` vs. the count, the pointers vs. the model pointers, and `wr_err`/`rd_err` vs. "a request was rejected on the previous edge". | Compare them on every snapshot |
+| 6 | 🟡 | `mem[wr_ptr]` / `mem[rd_ptr]` | That's the mirror-memory approach again (see the FAQ). A **queue** does push-back / pop-front without any index. | `expected ~= data;` / `expected = expected[1 .. $];` |
+| 7 | 🟡 | No `prev`/`cur` pairing, no first snapshot | Each check pairs the previous snapshot's **inputs** with this snapshot's **outputs**. Before the first reset, the DUT's state is **undefined** (the spec only defines it after reset), so nothing can be predicted yet. | Keep `prev`. Skip checks until the first reset has been seen. |
+| 8 | 🟡 | "I hope the RTL was written that way" | **The scoreboard follows the spec, never the RTL.** A model written to match what you expect the RTL to do will match its bugs too. When model and DUT disagree, the spec decides who's wrong. | – |
+
+### Corrected per-snapshot algorithm
+
+```
+on receive(cur):
+    if prev is null:                      // first snapshot: nothing to pair with
+        prev = cur; return
+
+    // The rising edge between prev and cur acted on prev's INPUTS.
+    if prev.rst:                                          // SPEC §3
+        expected = []; wrPtr = rdPtr = 0; expWrErr = expRdErr = false
+        modelValid = true
+    else if modelValid:
+        count = expected.length                           // model state BEFORE the edge
+        wrAcc = prev.wr_en && (count < 64 || prev.rd_en)  // §4, §6 (full + read frees a slot)
+        rdAcc = prev.rd_en && count > 0                   // §5, §6 (no write-through)
+        if rdAcc:                                         // CHK-01: data and order
+            check prev.rd_data == expected[0]             //   pre-edge value = value consumed
+            pop expected[0];  rdPtr += 1
+        if wrAcc:
+            push prev.wr_data; wrPtr += 1
+        expWrErr = prev.wr_en && !wrAcc                   // §7: pulse after a rejected request
+        expRdErr = prev.rd_en && !rdAcc
+
+    if modelValid:                                        // DUT state AFTER the edge
+        check cur.wr_ptr == wrPtr && cur.rd_ptr == rdPtr  // CHK-04
+        check cur.empty == (expected.length == 0)         // CHK-03
+        check cur.full  == (expected.length == 64)
+        check cur.wr_err == expWrErr && cur.rd_err == expRdErr   // CHK-05
+        // cur.rd_data is NOT checked here; while empty it's undefined (§3/§5)
+    prev = cur
+```
+
+Why the order inside the `else` matters: the data check uses `expected[0]` **before** the pop, and before the push (a push goes to the back, so with count > 0 the front is unchanged either way). At **empty**, `rdAcc` is false, so the byte pushed on that edge can never be "read" on the same edge. That's no write-through, enforced by construction.
+
+---
+
+## `fifo_scoreboard.d`: written by the reviewer on request, from the agreed algorithm
+
+At the author's request, the scoreboard was implemented from the corrected algorithm in the design review above, keeping the author's skeleton (class name, constructor, `@UVM_BUILD` analysis imp, `write` method). `fifo_env.d` got the two wiring lines it needs: create `scoreboard` in `build_phase`, and in `connect_phase`, `agent.monitor.mon_analysis_port.connect(scoreboard.mon_analysis_imp);`.
+
+Structure:
+
+| Part | What it does | Plan item |
+|---|---|---|
+| `write(cur)`, step 1 | From `prev`'s inputs and the **model's** count: reset → clear the model; else decide `wrAcc` / `rdAcc` (§4–§6), check `prev.rd_data` against `expected[0]` on an accepted read and pop, push on an accepted write, predict `expWrErr` / `expRdErr` | CHK-01, CHK-02, CHK-07 |
+| `write(cur)`, step 2 | Compare `cur`'s `wr_ptr`, `rd_ptr`, `empty`, `full`, `wr_err`, `rd_err` with the prediction | CHK-03, -04, -05, -06 |
+| `modelValid` | No checks until the first reset has been seen (the DUT's state before reset is undefined) | SPEC §3 |
+| `check(ok, what, exp, got)` | One `uvm_error("SCB", "<what> mismatch: expected=.. got=..")` per mismatch | – |
+| `report_phase` | Prints `samples`, `edges_checked`, `data_checks`, `writes`, `reads`, `left_in_fifo`, `mismatches`, and raises an error if **nothing** was checked | Completion criteria 2–3 |
+
+D details used: `expected ~= x` (append), `expected = expected[1 .. $]` (drop the front; `$` is the length inside `[ ]`), `immutable` (a local that can't change after it's set), `ubvec!6 += 1` (wraps 63 → 0), `toubvec!6(0)` (a `ubvec` from an integer).
+
+### Verification of the checker itself
+
+1. **Smoke test passes**, and the counts add up: `samples=15 edges_checked=14 data_checks=4 writes=4 reads=4 left_in_fifo=0 mismatches=0`. 14 = 15 − 1: every pair of consecutive samples was checked (the first pair already includes the reset edge). 4 data checks = 4 accepted reads.
+2. **Fault injection**: a checker that has never failed hasn't been tested. In a scratch copy only, the monitor was made to report a wrong `wr_ptr` at 120 ns and to flip one bit of `rd_data` at 180 ns:
+   ```
+   ERROR   120 ns  SCB  wr_ptr mismatch: expected=2 got=7
+   ERROR   200 ns  SCB  rd_data mismatch: expected=59 got=58
+   ...  mismatches=2        UVM_ERROR :    2
+   ```
+   Both caught. The `rd_data` sampled at **180** ns is reported at **200** ns: the read is checked when the snapshot **after** the consuming edge arrives. Reading reports this way (error time = one sample after the cause) matters when debugging.
