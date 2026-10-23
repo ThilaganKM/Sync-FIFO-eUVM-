@@ -34,6 +34,7 @@ Nothing here gives away anything about bugs in the RTL.
   - [`get_next_item` or `try_next_item` in the driver?](#get_next_item-or-try_next_item-in-the-driver)
   - [How do I print the value of a `VlPort`?](#how-do-i-print-the-value-of-a-vlport)
   - [Why did "Simulation Complete" appear in the middle of my log, before the last cycles?](#why-did-simulation-complete-appear-in-the-middle-of-my-log-before-the-last-cycles)
+  - [The log is hard to follow. How do I get colours and section headers?](#the-log-is-hard-to-follow-how-do-i-get-colours-and-section-headers)
 - [Git](#git)
   - [I added a file to `.gitignore` but git still tracks it. Why?](#i-added-a-file-to-gitignore-but-git-still-tracks-it-why)
   - [Untracking a file hides it from future commits. Is it gone from the repo?](#untracking-a-file-hides-it-from-future-commits-is-it-gone-from-the-repo)
@@ -589,6 +590,32 @@ make run 2>&1 | tee run.log
 `2>&1` sends stderr (stream 2) wherever stdout (stream 1) goes, so `tee` sees both. Without it, `run.log` only contains the UVM messages.
 
 **Lesson:** the order of lines in a log isn't automatically the order of events. Trust the **timestamps** (`@ 230000`) and the summary counts over the line order.
+
+### The log is hard to follow. How do I get colours and section headers?
+
+Use the log viewer, `sim/logview.py`. The simulation log stays **plain text**, and the viewer only changes how it's **displayed**:
+
+```bash
+cd sim
+make run 2>&1 | tee run.log      # run, and save the full log (stdout + stderr)
+make view                        # colour-coded, paged view of run.log  (q to quit)
+make view LOG=other.log          # view a different log
+make run 2>&1 | python3 logview.py   # live view while it runs
+```
+
+What it does:
+
+| Feature | Detail |
+|---|---|
+| Compact lines | `c007   150 ns  DRV  rst=0 wr=0 rd=1 wdata=00` instead of `UVM_INFO ../testbench/fifo_driver.d(42) @ 150000: tb.uvm_dock.root.uvm_test_top.env.agent.driver [DRV] ...`. Time in **ns** (the raw log is in ps). |
+| Cycle numbers | `c000`, `c001`, ...: every SEQ, DRV and MON line belonging to the same clock cycle has the same number (from the time, with a 20 ns period and the first posedge at 10 ns; `--period` / `--first-edge` if the clock changes). |
+| Section headers | `──── WRITE (from cycle c003) ────` whenever the kind of cycle changes (RESET / WRITE / READ / R+W / IDLE), worked out from the `rst`, `wr`, `rd` fields. `--no-headers` turns them off for random tests. |
+| Colours | Tags (SEQ cyan, DRV yellow, MON green), data bytes bold, flags bright when `1` and dim when `0`, `werr`/`rerr` red when set, `UVM_ERROR`/`UVM_FATAL` lines red, and summary counts green at 0, red otherwise. |
+| DRV lines show stimulus only | The driver never fills in the response fields, so their zeros are hidden. The real outputs come from MON lines. |
+
+**Why not put colour codes into the log itself?** Industry practice is to keep logs plain: ANSI colour codes are invisible escape sequences (`^[[1;31m`) that break `grep`, `diff`, editors and CI log parsers. Colouring at **view time** (like `less -R`, `ccze` or IDE log viewers) keeps the archived log clean and the display friendly. The same reasoning is why the section headers are worked out by the viewer instead of being extra `uvm_info` lines in the sequence: the viewer can't get the ordering wrong. A banner printed by the sequence when a phase starts would appear *between* a cycle's DRV and MON lines, because the monitor samples half a cycle later.
+
+Plain-text fallbacks: output that isn't a terminal (a pipe or file) is uncoloured unless you pass `--color`, and `NO_COLOR=1` disables colour too.
 
 ---
 

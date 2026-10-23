@@ -35,7 +35,7 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
               obj_dir/V$(DUT)__ALL.a \
               obj_dir/verilated.o obj_dir/verilated_threads.o obj_dir/verilated_vcd_c.o
 
-.PHONY: all run clean
+.PHONY: all run view clean
 
 # If a recipe fails, delete its target (e.g. verilator.stamp), so a failed
 # step is never mistaken for a finished one on the next make.
@@ -48,6 +48,12 @@ all: $(TOP)
 # without this, the two streams interleave out of order in the terminal/log.
 run: $(TOP)
 	stdbuf -oL ./$(TOP) +UVM_TESTNAME=$(TEST) +UVM_VERBOSITY=$(VERBOSITY) +seed=$(SEED)
+
+# Colour-coded, compact view of a saved log (see logview.py for options).
+#   make run 2>&1 | tee run.log ;  make view
+LOG ?= run.log
+view:
+	python3 logview.py --color $(LOG) | less -R
 
 clean:
 	rm -rf $(TOP) $(TOP).o *.vcd euvm_dir obj_dir verilator.stamp
