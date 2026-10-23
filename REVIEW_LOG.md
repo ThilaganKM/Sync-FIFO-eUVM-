@@ -390,3 +390,94 @@ The author fixed the main errors ✅: `seq` is now a `FifoSmokeSeq` (`import fif
 Not done (kept minimal): the `FifoBaseTest` / `FifoSmokeTest` split (#3). It becomes worth doing when the **second** test is written: at that point, move `build_phase` into a base class and let each test override only `run_phase`.
 
 Scratch run, full testbench (`make run`): 14 `[DRV]` cycles, `[SEQ]` messages from `uvm_test_top.env.agent.sequencer@@seq`, `UVM_FATAL : 0`, `UVM_ERROR : 0`, `UVM_WARNING : 0`, and `sync_fifo_tb.vcd` written (timescale 1 ps).
+
+---
+
+## Design review: the monitor (before writing code)
+
+Four questions were answered before any monitor code was written:
+
+| # | Question | Answer given | Review |
+|---|---|---|---|
+| 1 | When does the monitor sample, and what does a sample contain? | "At the negedge; all the signals needed for the comparison." | ✅ Negedge is right. Be precise about **which edge each value belongs to**. A sample at the negedge between rising edges N and N+1 holds: the **inputs** (`rst`, `wr_en`, `rd_en`, `wr_data`) that edge **N+1** will act on; **`rd_data`**, the value a read on edge **N+1** would consume (SPEC §5); and the registered **outputs** (`full`, `empty`, pointers, error flags), the result of edge **N**. So one snapshot mixes two edges, and the scoreboard pairs **snapshot k's inputs** with **snapshot k+1's outputs** to check what edge N+1 did. |
+| 2 | How often does it send a transaction? | "Sample correctly at the time the DUT updates, so on every negedge." | ✅ Every negedge. One correction to the reasoning: the negedge is chosen because the DUT does **not** update there. Mid-cycle, everything is stable, which avoids racing the rising edge where registers change. And every cycle (not only "interesting" ones), because idle cycles are checked too: flags must hold, and an error pulse must drop after exactly one cycle (SPEC §7, "at no other time"). This doesn't contradict the comparator lesson ("events, not levels"): there, one *event* was reported several times by mistake. Here, the transaction is **defined** as one cycle, so each cycle is reported exactly once, and `checks == cycles` stays verifiable. |
+| 3 | How does the transaction reach the scoreboard? | "Via the analysis port." | ✅ `uvm_analysis_port!FifoItem` in the monitor, `uvm_analysis_imp` in the scoreboard, and `port.write(item)`. It's a **broadcast**: one port can feed many subscribers (scoreboard, coverage collector) without the monitor knowing who listens, and `write()` is non-blocking, so the monitor never stalls. |
+| 4 | Does the monitor check anything? | "Only observes and reconstructs the packets." | ✅ Passive. Checking belongs to the scoreboard, so the same monitor can be reused, e.g. in a passive agent at SoC level where there's no driver. For this FIFO, "reconstructing" is trivial: one transaction = one cycle snapshot. (A bus monitor, say AXI, would assemble a multi-cycle burst into one transaction.) |
+
+**Pitfall to avoid when writing it: create a fresh item every cycle.** The comparator's monitor created one object before its loop and re-sent the **same object** each time. That only worked because its scoreboard used each item immediately. This scoreboard has to **keep the previous snapshot** (point 1). If the monitor reuses one object, the "previous" snapshot the scoreboard stored is the same object, overwritten in place by the next cycle, and every comparison silently compares a cycle with itself. `write()` passes a **reference**, not a copy.
+
+---
+
+## Review 6: `fifo_monitor.d` (first draft)
+
+```d
+class FifoMonitor : uvm_monitor
+{
+    mixin uvm_component_utils;
+    FifoIntf vif;
+    FifoItem item;
+    @UVM_BUILD
+    {
+        uvm_analysis_port!item mon_analysis_port;
+    }
+    this(string name="FifoMonitor",uvm_component parent = null){super(name,parent);}
+
+    override void build_phase(uvm_phase phase)
+    {
+        if(!uvm_config_db.get(this,"","vif",vif))
+        {
+            uvm_fatal("VIF","virtual interface not found");
+        }
+    }
+    override void run_phase(uvm_phase phase)
+    {
+        super.run_phase(phase);
+        item = FifoItem.type_id.create("item");
+        while(true)
+        {
+            wait(vif.clock.negedge);
+            item.rd_data = vif.rd_data;
+            ...                          // 10 fields copied
+            mon_analysis_port.write(item);
+        }
+    }
+}
+```
+
+What's right: `uvm_monitor` with the mixin, the port declared inside `@UVM_BUILD` (eUVM constructs it automatically), `vif` checked with `uvm_fatal`, sampling on **`negedge`**, `write()` once per cycle, and no checking in the monitor.
+
+Compiler output, peeled one error at a time:
+```
+fifo_monitor.d(14): Error: template instance `uvm_analysis_port!(item)` does not match template declaration `uvm_analysis_port(T)`
+                    `item` is not a type                       (+ 6 cascade errors from uvm_component_utils)
+-- after fixing that:
+fifo_monitor.d(20): Error: template `uvm_config_db(T = int)` does not have property `get`
+```
+
+| # | Sev. | Issue | Why it matters | Fix |
+|---|---|---|---|---|
+| 1 | 🔴 | `uvm_analysis_port!item` | `item` is the **variable** (and the comparator's *class* name, where this line came from). The template needs the **type**. The 6 errors after it are a cascade. | `uvm_analysis_port!FifoItem` |
+| 2 | 🔴 | `uvm_config_db.get(...)` | `uvm_config_db` is a template too. It needs the type of the value being fetched, as in the driver. | `uvm_config_db!FifoIntf.get(...)` |
+| 3 | 🔴 | **One item created before the loop and re-sent every cycle** | The pitfall from the design review. Measured with a throwaway subscriber that keeps the previous item: **`received=15  same_object_as_previous=14`**. With `create` moved inside the loop: **`same_object_as_previous=0`**. With one shared object, a scoreboard that pairs snapshot k with snapshot k+1 would compare an object with itself, every cycle, and never fail. That's a testbench that can't catch bugs. | Move `create` inside the loop, after the `wait`. Make `item` a local variable (`auto item = FifoItem.type_id.create("item");`) and drop the class member, so it **can't** be reused by accident. |
+| 4 | 🔴 | `rst` not sampled (10 of the 11 fields) | The scoreboard has to know when reset was applied to predict the reset state (CHK-07, SPEC §3), and to ignore requests during reset. | `item.rst = vif.rst;` |
+| 5 | 🔴 | The agent doesn't create the monitor | `fifo_agent.d` was not updated, so the monitor class compiles but is **never instantiated**: no samples, no errors, and nothing to show it's missing. | In the agent: `import fifo_monitor;`, a `FifoMonitor monitor;` member, and `monitor = FifoMonitor.type_id.create("monitor", this);` in `build_phase` |
+| 6 | 🟡 | `build_phase` doesn't call `super.build_phase(phase)` | Tested: the `@UVM_BUILD` port is still constructed here, so nothing breaks today. But the base class's `build_phase` is where UVM does its own build work (e.g. applying configuration), and skipping it is a classic source of "it worked until…" bugs. Every other component calls it first. | `super.build_phase(phase);` as the first line |
+| 7 | 🟢 | No log line | One `[MON]` line per cycle, with real DUT outputs, lets you read the DUT's behaviour from the log even before the scoreboard exists. | `uvm_info("MON", item.convert2string(), UVM_HIGH);` before `write` |
+| 8 | 🟢 | `vif.clock.negedge` without `()` | Legal D (no-argument functions can be called without parentheses), but the driver writes `posedge()`. | `negedge()` for consistency |
+
+**Correction to earlier guidance:** assigning ports directly (`item.rd_data = vif.rd_data;`, `item.wr_ptr = vif.wr_ptr;`) **compiles**. The `cast(ubyte) ... .read()` form suggested before the review isn't needed for reads. The strictness only applies in the other direction: **writing an `int` literal into a port** (driver Review 4: `vif.wr_data = 0x00`).
+
+Note for the scoreboard: the monitor delivered **15** samples for **14** driven cycles. It samples every negedge while the simulation runs, including the drain time. So the scoreboard's "checks == cycles" count should be based on the samples it receives, not on the number of items driven.
+
+### Review 6, closed (second draft + fixes applied by the reviewer on request)
+
+The author fixed #1–#6 ✅ (port type, `rst` sampled, `super.build_phase`, the monitor created in the agent, the item no longer a class member). Remaining changes, applied on request:
+
+| Line | Change | Why |
+|---|---|---|
+| 20 | `uvm_config_db!FifoIntfget(` → `uvm_config_db!FifoIntf.get(` | A missing `.`: the compiler would read `FifoIntfget` as one (unknown) identifier. |
+| 31 | `item = ...create(...)` → `auto item = ...create(...)` | With the class member removed, `item` has to be declared. `auto` declares a **local** whose type is inferred from the right-hand side (`FifoItem`). Being local to the loop body, it can't survive into the next cycle: reuse is now impossible. |
+| 30 | `negedge` → `negedge()` | Suggestion #8, consistency with the driver |
+| 43 | Added `uvm_info("MON", item.convert2string(), UVM_HIGH);` | Suggestion #7, one line per sample with real DUT outputs |
+
+Scratch run of the smoke test: builds, `UVM_FATAL : 0`, `UVM_ERROR : 0`, **15 `[MON]` lines** (one per negedge, 20 ns … 300 ns). The analysis port has no subscriber yet, which is legal: `write()` to an unconnected analysis port simply delivers to nobody.

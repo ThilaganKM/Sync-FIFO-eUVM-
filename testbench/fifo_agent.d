@@ -3,6 +3,7 @@ import esdl;
 import uvm;
 import fifo_driver;
 import fifo_sequencer;
+import fifo_monitor;
 
 class FifoAgent : uvm_agent
 {
@@ -11,11 +12,14 @@ class FifoAgent : uvm_agent
     {super(name,parent);}
     FifoDriver driver;
     FifoSequencer sequencer;
+    FifoMonitor monitor;
+
     override void build_phase(uvm_phase phase)
     {
         super.build_phase(phase);
         driver = FifoDriver.type_id.create("driver",this);
         sequencer = FifoSequencer.type_id.create("sequencer",this);
+        monitor = FifoMonitor.type_id.create("monitor",this);
     }
     override void connect_phase(uvm_phase phase)
     {
