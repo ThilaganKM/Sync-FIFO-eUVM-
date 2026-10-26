@@ -58,3 +58,10 @@ class FifoTest : FifoBaseTest
     }
     override FifoBaseSeq createSeq() { return FifoSmokeSeq.type_id.create("seq"); }
 }
+//Fill and drain test: reset, 64 writes, 64 reads
+class FifoFillDrainTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoFillDrainSeq.type_id.create("seq"); }
+}

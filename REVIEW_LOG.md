@@ -617,3 +617,36 @@ Verified (scratch build):
 - `make run` (FifoTest): unchanged, `edges_checked=14 data_checks=4 mismatches=0`.
 - `make run TEST=fifo_test.FifoBaseTest`: `FATAL ... FifoBaseTest runs no sequence`, as intended.
 - The helper version of the smoke body gives the **same control, pointers and flags** in all 28 DRV/MON lines, and still 0 mismatches, but **different data bytes**. `doCycle` calls `randomize()` on every cycle (reset, read and idle cycles too), while the original loops only randomize write cycles, so the random stream is consumed differently. Both are correct, because `wr_data` is a don't-care when `wr_en = 0`. Lesson: "same seed" only reproduces a run if the stimulus code consumes random numbers in the **same order**. Changing the stimulus code changes the values.
+
+---
+
+## Review 7: `FifoFillDrainSeq` (first draft)
+
+```d
+class FifoFillDrainSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoSmokeSeq"){super(name);}
+    FifoItem item;
+    override void body()
+    {
+        doReset(1);
+        doWrites(63);
+        doReads(63);
+    }
+}
+```
+
+What's right: it extends `FifoBaseSeq` and uses the helpers, so the body reads like the plan.
+
+| # | Sev. | Issue | Why it matters | Fix |
+|---|---|---|---|---|
+| 1 | 🔴 | **63** writes / reads instead of **64** | The FIFO is 64 deep (SPEC §1). TS-02's purpose is "`full` rises exactly after the 64th write". With 63 the FIFO is never full, so the test can't check its main point. Slot **indices** go to 63, but the **count** is 64: a classic off-by-one. And if 63 was chosen because 64 produced errors: **never change a spec-derived test to make the DUT pass.** A failing spec-correct test is a finding to investigate (testbench or RTL?), not something to shrink away. | `doWrites(64); doReads(64);` |
+| 2 | 🟡 | Default name `"FifoSmokeSeq"` | Copy-paste: the log would label this sequence as the smoke sequence. | `"FifoFillDrainSeq"` |
+| 3 | 🟡 | Unused `FifoItem item;` | The helpers use `req`. | Remove |
+| 4 | 🟢 | No trailing idle | Optional: the drain time already covers the edge after the last read. | `doIdle(2);` |
+| – | 🔴 | No `FifoFillDrainTest` | Needed to run it (`TEST=fifo_test.FifoFillDrainTest`). | 5-line class overriding `createSeq()` (see the comment in `fifo_test.d`) |
+
+### Review 7, follow-up
+
+Fixed ✅: `doWrites(64); doReads(64);`, the default name is now `"FifoFillDrainSeq"`, the unused member is gone, and `FifoFillDrainTest` was added to `fifo_test.d`. First run (seed 1): `samples=130 edges_checked=129 data_checks=64 writes=64 reads=64 left_in_fifo=0 mismatches=71`, `UVM_ERROR : 71`. The counts confirm every edge was checked. Next step: debug from the **first** error.

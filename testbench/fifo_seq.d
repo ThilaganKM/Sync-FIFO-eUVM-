@@ -90,4 +90,18 @@ class FifoSmokeSeq : FifoBaseSeq
     // ALTERNATIVE: the same body() written with the FifoBaseSeq helpers:
     //     override void body() { doReset(3); doWrites(4); doReads(4); doIdle(3); }
     // ---------------------------------------------------------------------
+
+}
+
+class FifoFillDrainSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoFillDrainSeq"){super(name);}
+    
+    override void body()
+    {
+        doReset(1);
+        doWrites(64);
+        doReads(64);
+    }
 }
