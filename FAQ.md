@@ -14,6 +14,7 @@ Nothing here gives away anything about bugs in the RTL.
   - [When is a write rejected? What happens when `wr_ptr` reaches 63?](#when-is-a-write-rejected-what-happens-when-wr_ptr-reaches-63)
   - [After a wrap, `wr_ptr < rd_ptr`. Isn't that a problem?](#after-a-wrap-wr_ptr--rd_ptr-isnt-that-a-problem)
   - [Should the scoreboard decide "write accepted?" from the DUT's `full` flag?](#should-the-scoreboard-decide-write-accepted-from-the-duts-full-flag)
+  - [Where's the pass/fail result in the log?](#wheres-the-passfail-result-in-the-log)
   - [The scoreboard reported many errors. How do I read the first one correctly?](#the-scoreboard-reported-many-errors-how-do-i-read-the-first-one-correctly)
   - [`wr_ptr` is 6 bits wide. How can a 64-entry FIFO be full?](#wr_ptr-is-6-bits-wide-how-can-a-64-entry-fifo-be-full)
   - [The DUT disagrees with the spec. Could the spec be wrong?](#the-dut-disagrees-with-the-spec-could-the-spec-be-wrong)
@@ -47,6 +48,7 @@ Nothing here gives away anything about bugs in the RTL.
   - [How do I print the value of a `VlPort`?](#how-do-i-print-the-value-of-a-vlport)
   - [Why did "Simulation Complete" appear in the middle of my log, before the last cycles?](#why-did-simulation-complete-appear-in-the-middle-of-my-log-before-the-last-cycles)
   - [The log is hard to follow. How do I get colours and section headers?](#the-log-is-hard-to-follow-how-do-i-get-colours-and-section-headers)
+  - [Is there a table view, and a way to see every test's result at once?](#is-there-a-table-view-and-a-way-to-see-every-tests-result-at-once)
 - [Git](#git)
   - [I added a file to `.gitignore` but git still tracks it. Why?](#i-added-a-file-to-gitignore-but-git-still-tracks-it-why)
   - [Untracking a file hides it from future commits. Is it gone from the repo?](#untracking-a-file-hides-it-from-future-commits-is-it-gone-from-the-repo)
@@ -195,6 +197,25 @@ Only modulo-64 arithmetic is valid, and even it can't tell **0 from 64** (both g
 No. **The model decides from its own state**: "accepted" means `count < 64` (or a simultaneous read), with `count = expected.length`. Then it compares the DUT's `full` with its own prediction.
 
 If the model used the DUT's `full` to decide, it would **trust the thing it's checking**. A DUT with a wrong `full` flag would make the model accept or reject exactly as the DUT did, and the two would always agree. Rule: **DUT outputs are only ever compared, never used to drive the model.** The inputs (`wr_en`, `rd_en`, `wr_data`, `rst`) are the only DUT-side values the model consumes.
+
+### Where's the pass/fail result in the log?
+
+At the **end** of the log, in two lines:
+
+| Line | Printed by |
+|---|---|
+| `[SCB] samples=130 edges_checked=129 data_checks=64 writes=64 reads=64 left_in_fifo=0 mismatches=0` | the scoreboard's `report_phase` |
+| `UVM_ERROR :    0` (and `UVM_FATAL :    0`) | UVM's report server, in the `--- UVM Report Summary ---` block |
+
+Finding them:
+
+```bash
+grep -E "samples=|UVM_(ERROR|FATAL) :" run.log     # -E: extended regex; | means "or"
+tail -30 run.log                                   # the last 30 lines
+make view LOG=run.log                              # then G (end of file), or /samples= to search
+```
+
+Read them in order: first **no errors and no fatals**, then **the counts make sense for the test** (every edge checked, data checks = accepted reads, writes and reads as intended). A run with 0 errors but `edges_checked=0` has checked nothing.
 
 ### The scoreboard reported many errors. How do I read the first one correctly?
 
@@ -801,6 +822,50 @@ What it does:
 **Why not put colour codes into the log itself?** Industry practice is to keep logs plain: ANSI colour codes are invisible escape sequences (`^[[1;31m`) that break `grep`, `diff`, editors and CI log parsers. Colouring at **view time** (like `less -R`, `ccze` or IDE log viewers) keeps the archived log clean and the display friendly. The same reasoning is why the section headers are worked out by the viewer instead of being extra `uvm_info` lines in the sequence: the viewer can't get the ordering wrong. A banner printed by the sequence when a phase starts would appear *between* a cycle's DRV and MON lines, because the monitor samples half a cycle later.
 
 Plain-text fallbacks: output that isn't a terminal (a pipe or file) is uncoloured unless you pass `--color`, and `NO_COLOR=1` disables colour too.
+
+### Is there a table view, and a way to see every test's result at once?
+
+Yes: `logview.py` has two more views, wrapped by makefile targets.
+
+**`make table`: one row per rising edge.** This builds the scoreboard's pairing rule into the layout: each row is **one edge**, with the inputs that went *into* it, the `rd_data` it consumes, the outputs *after* it, and the scoreboard's verdict for **that** edge.
+
+```
+              │──── inputs into the edge ──── │ before  │──── outputs after the edge ─── │
+ cyc  edge ns │ op    rst wr rd wdata wr# rd# │   rdata │ wptr rptr full empty werr rerr │ scoreboard
+ c062    1270 │ WRITE   0  1  0    cf  62   0 │      92 │   62   00    0     0    0    0 │ ✓
+ c063    1290 │ WRITE   0  1  0    5a  63   0 │      92 │   63   00    1     0    0    0 │ ✗ full: exp 0 got 1
+               └─ ERROR @1300 ns [SCB] full mismatch: expected=0 got=1
+```
+
+| Column | Meaning |
+|---|---|
+| `cyc`, `edge ns` | The cycle whose inputs this edge consumes, and the edge's time |
+| `wr#`, `rd#` | Write and read **requests** sent so far, restarting at reset. They answer "which write is this?" without counting by hand. |
+| `rdata` (before) | `rd_data` just before the edge: the byte a read on this edge consumes (bold when `rd=1`) |
+| outputs | The DUT's state after the edge. **Cyan** = changed at this edge, red `werr`/`rerr` = an error pulse. |
+| scoreboard | `✓`, `✓ read 92`, or `✗` with the first mismatch. Every error is listed in full under its row (`└─`). |
+
+```bash
+make table LOG=filldrain.log                                   # whole run (q to quit)
+make table LOG=filldrain.log ARGS=--first-error                # start here on a FAIL
+make table LOG=filldrain.log ARGS=--errors-only                # every error, 3 edges of context
+make table LOG=filldrain.log ARGS="--around 1300 --context 5"  # edges near a time
+```
+
+The footer gives the scoreboard counts, the UVM error and fatal counts, a **PASS/FAIL** verdict, and *"first error at edge … ns"*.
+
+**`make summary`: regression table.** One line per `*.log` in `sim/`:
+
+```
+log           test               seed  edges  data  writes  reads  left  mismatch  errors  fatal result
+filldrain.log FifoFillDrainTest     1    129    64      64     64     0         0       0      0 PASS
+run.log       FifoTest              1     14     4       4      4     0         0       0      0 PASS
+2/2 runs passed
+```
+
+The verdict rules: **FAIL** if any `UVM_ERROR` or `UVM_FATAL`; **INCOMPLETE** if the log has no UVM report summary (the run crashed or was cut short); **NO SCB** if there's no scoreboard report; **NO CHECKS** if the scoreboard checked 0 edges (zero errors with zero checks proves nothing); **NOT A RUN** for a non-simulation log, e.g. a build log; otherwise **PASS**.
+
+Tip: name each run's log after its test (`make run TEST=fifo_test.X 2>&1 | tee x.log`), so `make summary` shows the whole regression.
 
 ---
 

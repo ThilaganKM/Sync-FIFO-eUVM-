@@ -36,7 +36,7 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
               obj_dir/V$(DUT)__ALL.a \
               obj_dir/verilated.o obj_dir/verilated_threads.o obj_dir/verilated_vcd_c.o
 
-.PHONY: all run view clean
+.PHONY: all run view table summary clean
 
 # If a recipe fails, delete its target (e.g. verilator.stamp), so a failed
 # step is never mistaken for a finished one on the next make.
@@ -55,6 +55,18 @@ run: $(TOP)
 LOG ?= run.log
 view:
 	python3 logview.py --color $(LOG) | less -R
+
+# Edge table: one row per rising edge (inputs -> outputs -> scoreboard verdict).
+#   make table LOG=filldrain.log
+#   make table LOG=filldrain.log ARGS=--first-error      (start here on a FAIL)
+#   make table LOG=filldrain.log ARGS="--around 1300 --context 5"
+ARGS ?=
+table:
+	python3 logview.py --color --table $(ARGS) $(LOG) | less -R
+
+# Regression summary: one PASS/FAIL line per log file in sim/.
+summary:
+	@python3 logview.py --color --summary $(wildcard *.log)
 
 clean:
 	rm -rf $(TOP) $(TOP).o *.vcd euvm_dir obj_dir verilator.stamp
