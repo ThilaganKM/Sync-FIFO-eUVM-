@@ -41,9 +41,13 @@ module sync_fifo #(
     // Status flags (SPEC §8)
     //   empty : 0 entries stored
     //   full  : 64 entries stored
+    // The pointers are equal both when empty and when full (SPEC §2), so
+    // the number of entries (0..64, 65 values) is kept in a 7-bit counter.
     //------------------------------------------------------------------
-    assign empty = (wr_ptr == rd_ptr);
-    assign full  = ((wr_ptr + 1'b1) == rd_ptr);
+    reg [ADDR_W:0] count;
+
+    assign empty = (count == 0);
+    assign full  = (count == DEPTH[ADDR_W:0]);
 
     //------------------------------------------------------------------
     // Accept / reject decisions (SPEC §4, §5, §6)
@@ -81,6 +85,19 @@ module sync_fifo #(
             rd_ptr <= {ADDR_W{1'b0}};
         else if (rd_acc)
             rd_ptr <= rd_ptr + 1'b1;
+    end
+
+    //------------------------------------------------------------------
+    // Entry count: +1 on an accepted write, -1 on an accepted read,
+    // unchanged when both or neither happen.
+    //------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (rst)
+            count <= {(ADDR_W+1){1'b0}};
+        else if (wr_acc && !rd_acc)
+            count <= count + 1'b1;
+        else if (rd_acc && !wr_acc)
+            count <= count - 1'b1;
     end
 
     //------------------------------------------------------------------

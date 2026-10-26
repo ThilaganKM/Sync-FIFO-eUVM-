@@ -14,6 +14,10 @@ Nothing here gives away anything about bugs in the RTL.
   - [When is a write rejected? What happens when `wr_ptr` reaches 63?](#when-is-a-write-rejected-what-happens-when-wr_ptr-reaches-63)
   - [After a wrap, `wr_ptr < rd_ptr`. Isn't that a problem?](#after-a-wrap-wr_ptr--rd_ptr-isnt-that-a-problem)
   - [Should the scoreboard decide "write accepted?" from the DUT's `full` flag?](#should-the-scoreboard-decide-write-accepted-from-the-duts-full-flag)
+  - [The scoreboard reported many errors. How do I read the first one correctly?](#the-scoreboard-reported-many-errors-how-do-i-read-the-first-one-correctly)
+  - [`wr_ptr` is 6 bits wide. How can a 64-entry FIFO be full?](#wr_ptr-is-6-bits-wide-how-can-a-64-entry-fifo-be-full)
+  - [The DUT disagrees with the spec. Could the spec be wrong?](#the-dut-disagrees-with-the-spec-could-the-spec-be-wrong)
+  - [How do I view the waveform, and how do I read it correctly?](#how-do-i-view-the-waveform-and-how-do-i-read-it-correctly)
   - [The scoreboard reports 0 mismatches. How do I know it actually works?](#the-scoreboard-reports-0-mismatches-how-do-i-know-it-actually-works)
   - [Random tests, stress tests, coverage, assertions: where do I start?](#random-tests-stress-tests-coverage-assertions-where-do-i-start)
   - [What is `convert2string()`, and is it needed?](#what-is-convert2string-and-is-it-needed)
@@ -191,6 +195,64 @@ Only modulo-64 arithmetic is valid, and even it can't tell **0 from 64** (both g
 No. **The model decides from its own state**: "accepted" means `count < 64` (or a simultaneous read), with `count = expected.length`. Then it compares the DUT's `full` with its own prediction.
 
 If the model used the DUT's `full` to decide, it would **trust the thing it's checking**. A DUT with a wrong `full` flag would make the model accept or reject exactly as the DUT did, and the two would always agree. Rule: **DUT outputs are only ever compared, never used to drive the model.** The inputs (`wr_en`, `rd_en`, `wr_data`, `rst`) are the only DUT-side values the model consumes.
+
+### The scoreboard reported many errors. How do I read the first one correctly?
+
+Three habits, all from debugging the first fill-and-drain run (71 errors):
+
+**1. Count transactions explicitly, using the pairing rule.** A MON line's **outputs** show what the **previous** edge did with the **previous** line's inputs. When a test does N writes, build a small table: *write k is driven in cycle c(k+1), consumed at the next edge, and its result is in the MON line of cycle c(k+2)*. It's very easy to read the result one write too early, e.g. to think `wptr=63` means "64 writes done" when it means 63 entries (slots 0–62) stored, with the 64th write still on the bus.
+
+**2. Group the errors by kind before reading them all:**
+
+```bash
+grep "UVM_ERROR ../testbench" run.log | sed -E 's/.*\[SCB\] ([a-z_]+) mismatch.*/\1/' | sort | uniq -c
+```
+
+(`sed -E` extracts the field name from each error; `sort | uniq -c` counts each distinct name.) A pattern such as "1 × A, 1 × B, then 65 × the same pointer mismatch" usually means **one** original disagreement, followed by a model and a DUT that stay out of step by one transaction. Only the **first** error needs explaining; the rest are consequences.
+
+**3. Check the model against the spec, not against your expectation of the DUT.** For the first error, look up each expected value in SPEC.md (depth, flag definition, acceptance rule). If the model agrees with the spec, the DUT is wrong. If it doesn't, the scoreboard is wrong. Never decide "the testbench is surely right" (or "surely wrong") without that check.
+
+Then, and only then, open the waveform around the first error's time to **confirm** the theory.
+
+### `wr_ptr` is 6 bits wide. How can a 64-entry FIFO be full?
+
+`wr_ptr` is the index of the slot the **next** write goes to (SPEC §2), not the last slot written. With no reads (`rd_ptr = 0`):
+
+| Writes done | Slots holding data | `wr_ptr` | Entries | `full` |
+|---|---|---|---|---|
+| 0 | none | 0 | 0 | 0 |
+| 63 | 0–62 | 63 | 63 | 0 (slot 63 still free) |
+| 64 | 0–63 | **0** (63 + 1 wraps) | 64 | 1 |
+
+`wr_ptr` never needs the value 64: after the 64th write it **wraps to 0** (§4). So 6 bits are enough for the **ports**.
+
+Note rows "0 writes" and "64 writes": both have `wr_ptr = rd_ptr = 0`, but one is empty and one is full. **The pointer values alone can't distinguish empty from full**, so `full`/`empty` can't be defined as a function of `wr_ptr` (§2 note). The entry count has **65** possible values (0–64), one more than 6 bits can represent, so a design needs one extra bit of internal state (a 7-bit counter, or a 7th "lap" bit on each pointer). That's an implementation choice inside the RTL and invisible at the ports. The scoreboard's equivalent is `expected.length`.
+
+### The DUT disagrees with the spec. Could the spec be wrong?
+
+It's the right question to ask first, and checking it is part of the job:
+
+1. **Check that the spec is consistent with itself.** For example, "when is the FIFO full?" is answered by §1 (depth 64), §2 (`full`: "holds 64 entries"), §4 (a write is rejected only when full) and §8 (`full = 1` at 64 entries, `0` for 1–63). They agree, so the spec is unambiguous on this point. If clauses contradicted each other, or a case was missing, you'd raise a **spec clarification** with the architect *before* filing an RTL bug.
+2. **If the spec is clear, it wins.** SPEC.md's introduction: *"If the two disagree, the spec wins, and the RTL has a bug."*
+3. **Never edit the spec (or the test) to match the DUT.** The DUT behaving differently isn't a reason to redefine correct behaviour.
+
+A common source of doubt is **index vs count**: slot indices run 0–63 (highest 63), but the entry count runs 0–64. `wr_ptr = 63` with no reads means slots 0–62 are filled, which is **63** entries: not full.
+
+### How do I view the waveform, and how do I read it correctly?
+
+**Option A: VaporView (inside VS Code, nothing to download).** Install the extension `lramseyer.vaporview` on the remote side. Then:
+1. In the Explorer, click `sim/sync_fifo_tb.vcd`. If it opens as text, right-click it and choose **Open With… → VaporView**.
+2. In VaporView's netlist panel, expand **`TOP`** and add the ports: `clk`, `rst`, `wr_en`, `wr_data`, `rd_en`, `rd_data`, `wr_ptr`, `rd_ptr`, `full`, `empty`, `wr_err`, `rd_err`.
+3. Zoom to the time of interest (e.g. the first error's timestamp from the log). Show multi-bit values like the pointers in **decimal**, to match the log.
+
+**Option B: gtkwave in WSL.** Copy the file to Windows (in VS Code, right-click it and choose **Download…**; or from WSL, `scp <user>@<server>:<path>/sim/sync_fifo_tb.vcd /mnt/d/<folder>/`), then run `gtkwave /mnt/d/<folder>/sync_fifo_tb.vcd`. In the SST pane, select `TOP`, pick the signals, and click **Append**.
+
+Reading it correctly:
+- **Stay at the `TOP` level.** It holds the DUT's ports, which is everything the spec defines. The `TOP.sync_fifo` scope also dumps the RTL's internal signals. For black-box verification, don't use them to decide pass or fail.
+- **Time units:** the VCD is in **ps**, so 1290 ns = 1 290 000 ps. The log viewer shows ns.
+- **Registered outputs** (`wr_ptr`, `rd_ptr`, `full`, `empty`, `wr_err`, `rd_err`) change at **rising** edges.
+- **Inputs appear to change at falling edges.** The driver drives right *after* the DUT has evaluated a rising edge, and the next waveform dump point is the falling edge. So `wr_en` shows its new value half a cycle later than the driver's log time. Either way, the DUT acts on it at the **next rising edge**. It's a dump artifact, not a timing problem.
+- To check one edge: read the inputs just **before** it, then the registered outputs just **after** it.
 
 ### The scoreboard reports 0 mismatches. How do I know it actually works?
 
