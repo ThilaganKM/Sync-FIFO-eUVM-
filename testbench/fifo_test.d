@@ -65,3 +65,17 @@ class FifoFillDrainTest : FifoBaseTest
     this(string name, uvm_component parent = null) { super(name, parent); }
     override FifoBaseSeq createSeq() { return FifoFillDrainSeq.type_id.create("seq"); }
 }
+// TS-05: read when empty (underflow)
+class FifoReadEmptyTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoReadEmptySeq.type_id.create("seq"); }
+}
+// TS-06: write when full (overflow)
+class FifoWriteFullTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoWriteFullSeq.type_id.create("seq"); }
+}

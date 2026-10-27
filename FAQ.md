@@ -14,6 +14,10 @@ Nothing here gives away anything about bugs in the RTL.
   - [When is a write rejected? What happens when `wr_ptr` reaches 63?](#when-is-a-write-rejected-what-happens-when-wr_ptr-reaches-63)
   - [After a wrap, `wr_ptr < rd_ptr`. Isn't that a problem?](#after-a-wrap-wr_ptr--rd_ptr-isnt-that-a-problem)
   - [Should the scoreboard decide "write accepted?" from the DUT's `full` flag?](#should-the-scoreboard-decide-write-accepted-from-the-duts-full-flag)
+  - [Sample vs edge: why does a table row pair two MON lines?](#sample-vs-edge-why-does-a-table-row-pair-two-mon-lines)
+  - [What's a "row" in `make table`, and where should an error pulse appear in it?](#whats-a-row-in-make-table-and-where-should-an-error-pulse-appear-in-it)
+  - [`UVM_FATAL [INVTST] Requested test ... not found`: what does it mean?](#uvm_fatal-invtst-requested-test--not-found-what-does-it-mean)
+  - [Several errors look like different problems. How do I tell if they're one?](#several-errors-look-like-different-problems-how-do-i-tell-if-theyre-one)
   - [Where's the pass/fail result in the log?](#wheres-the-passfail-result-in-the-log)
   - [The scoreboard reported many errors. How do I read the first one correctly?](#the-scoreboard-reported-many-errors-how-do-i-read-the-first-one-correctly)
   - [`wr_ptr` is 6 bits wide. How can a 64-entry FIFO be full?](#wr_ptr-is-6-bits-wide-how-can-a-64-entry-fifo-be-full)
@@ -197,6 +201,72 @@ Only modulo-64 arithmetic is valid, and even it can't tell **0 from 64** (both g
 No. **The model decides from its own state**: "accepted" means `count < 64` (or a simultaneous read), with `count = expected.length`. Then it compares the DUT's `full` with its own prediction.
 
 If the model used the DUT's `full` to decide, it would **trust the thing it's checking**. A DUT with a wrong `full` flag would make the model accept or reject exactly as the DUT did, and the two would always agree. Rule: **DUT outputs are only ever compared, never used to drive the model.** The inputs (`wr_en`, `rd_en`, `wr_data`, `rst`) are the only DUT-side values the model consumes.
+
+### Sample vs edge: why does a table row pair two MON lines?
+
+Two different things:
+
+| Word | What it is | Where you see it |
+|---|---|---|
+| **sample** | the monitor's mid-cycle snapshot (at the negedge) | one `MON` line (`make view`) |
+| **edge** | one rising clock edge, where the DUT acts | one row of `make table` |
+
+From the fill/drain log:
+
+```
+c001   40 ns  MON  rst=0 wr=1 rd=0 wdata=92 | rdata=00 wptr=00 rptr=00 full=0 empty=1 ...
+c002   60 ns  MON  rst=0 wr=1 rd=0 wdata=23 | rdata=92 wptr=01 rptr=00 full=0 empty=0 ...
+
+   40 ns sample          50 ns RISING EDGE         60 ns sample
+   wr=1 wdata=92  ─────► DUT stores 92  ─────────► wptr=01 empty=0
+```
+
+Within **one sample**, the inputs (left of `|`) wait for the *next* edge, while the outputs (right of `|`) are the result of the *previous* edge. So a MON line straddles two edges, and reading raw MON lines means pairing "this line's inputs with the next line's outputs".
+
+A **table row** is one edge: inputs from the sample before it, outputs from the sample after it. Seen per row, it's simply "this edge's inputs → this edge's outputs". Both descriptions are true, from different points of view; the table does the pairing so you don't have to.
+
+### What's a "row" in `make table`, and where should an error pulse appear in it?
+
+A **row** is one line of the `make table` output, and each row is **one rising clock edge**:
+
+```
+ cyc  edge ns │ op    rst wr rd wdata wr# rd# │   rdata │ wptr rptr full empty werr rerr │ scoreboard
+ c001      50 │ WRITE   0  1  0    92   1   0 │      00 │   01   00    0     0    0    0 │ ✓
+```
+
+Read it as cause → effect: *"at the edge at 50 ns, the inputs going **into** it were `wr=1, wdata=92` (write request #1); **after** it, the DUT showed `wptr=01 empty=0`; the scoreboard agrees."*
+
+**Error pulses.** SPEC §7: `wr_err`/`rd_err` are **registered**: a flip-flop set **by** the edge that rejects the request, high for one cycle **after** it. A **combinational** flag (gates only) would instead follow the request as soon as it's on the bus, i.e. *before* the edge.
+
+```
+              E1                      E2                      E3
+wr_en    ______/‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\______________________   request, acted on at E2
+registered     _______________________/‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\_   set BY E2 (SPEC §7)
+combinational  ______/‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\______________________   follows the request (not §7)
+```
+
+The monitor samples mid-cycle, so in the edge table:
+
+| | row E1 | row E2 (the rejected request) | row E3 |
+|---|---|---|---|
+| registered (correct) | 0 | **1** (same row as the request) | 0 |
+| combinational | **1** (one row early) | 0 | 0 |
+
+The scoreboard predicts the pulse for the request's own row and reports a mismatch if it's anywhere else.
+
+### `UVM_FATAL [INVTST] Requested test ... not found`: what does it mean?
+
+`+UVM_TESTNAME=fifo_test.FifoReadEmptyTest` asks the UVM **factory** to create a class named `FifoReadEmptyTest` from module `fifo_test`. The fatal at time 0 means the factory doesn't know that name. Causes, most common first:
+
+1. **The test class doesn't exist.** Writing the *sequence* (in `fifo_seq.d`) isn't enough: each test is a class in `fifo_test.d` that selects the sequence by overriding `createSeq()`.
+2. **No `mixin uvm_component_utils;`** in the class, so it was never registered with the factory.
+3. **Wrong prefix.** The part before the dot is the D **module** name (`module fifo_test;`), not the file path.
+4. **Stale binary.** `make run` rebuilds automatically, but running `./sync_fifo_tb` directly doesn't.
+
+### Several errors look like different problems. How do I tell if they're one?
+
+1. **Look for a pattern before explaining errors one by one.** Line up "what the DUT did" against "what the model expected" for every error row. Several errors are often **one shift**: the same pattern, displaced by one edge, produces an "extra" pulse on one row and a "missing" one on the next.
+2. **Compare with a sibling check that passes.** If two signals are predicted by the **same** model rule and sampled the **same** way, and one passes while the other fails, the model's timing can't be the problem: the difference is in the DUT. If both fail the same way, suspect the model or the monitor first.
 
 ### Where's the pass/fail result in the log?
 

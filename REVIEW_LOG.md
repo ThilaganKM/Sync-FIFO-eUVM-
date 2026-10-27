@@ -650,3 +650,44 @@ What's right: it extends `FifoBaseSeq` and uses the helpers, so the body reads l
 ### Review 7, follow-up
 
 Fixed ✅: `doWrites(64); doReads(64);`, the default name is now `"FifoFillDrainSeq"`, the unused member is gone, and `FifoFillDrainTest` was added to `fifo_test.d`. First run (seed 1): `samples=130 edges_checked=129 data_checks=64 writes=64 reads=64 left_in_fifo=0 mismatches=71`, `UVM_ERROR : 71`. The counts confirm every edge was checked. Next step: debug from the **first** error.
+
+---
+
+## Review 8: `FifoReadEmptySeq` (TS-05) and `FifoWriteFullSeq` (TS-06)
+
+```d
+// TS-05
+doReset(1);
+doReads(1);    // read error expected
+doIdle(2);     // rd_err must drop: 1-cycle pulse
+doWrites(3);
+doReads(6);    // first 3 accepted, next 3 rejected
+doIdle(2);
+
+// TS-06
+doReset(1);
+doWrites(64);
+doWrites(1);   // rejected write
+doIdle(2);     // wr_err drops
+doWrites(3);   // 3 consecutive rejected writes
+doIdle(1);
+doReads(64);   // the original 64 bytes, in order
+doIdle(2);
+```
+
+✅ Both cover every case in the plan: TS-05 (a) after reset, (b) after a drain, (c) single, (d) consecutive; TS-06 single + consecutive rejects, then a full drain. `doReads(6)` puts the drain and the underflow back-to-back with no idle cycle in between, which is slightly stronger than two separate phases. No poison data is needed for TS-06: the scoreboard never pushes a rejected write, so a DUT that stored one would show up as an `rd_data` mismatch during the drain (CHK-02).
+
+| # | Sev. | Issue | Fix |
+|---|---|---|---|
+| 1 | 🔴 | No `FifoReadEmptyTest` / `FifoWriteFullTest` in `fifo_test.d`: `TEST=...` would give `UVM_FATAL ... not found` | Two 5-line classes overriding `createSeq()` |
+| 2 | 🟢 | Comment "rejected write due to full flag" | The DUT rejects because the FIFO **is** full. The flag only *reports* that state. Wording: "rejected: FIFO full (SPEC §4)" |
+
+### Review 8, follow-up: predictions and the first run
+
+First run: `UVM_FATAL [INVTST] Requested test from command line +UVM_TESTNAME=fifo_test.FifoReadEmptyTest not found.` (same for `FifoWriteFullTest`). Cause: issue #1 above, the test classes hadn't been added yet.
+
+Predictions given before running, all correct: (1) after the first read, `rptr=0 empty=1 rerr=1`; (2) `rerr` drops on the idle edge; (3) `rerr=1` for exactly 3 edges; (4) on the 65th write request, `wptr=0 full=1 werr=1`; (5) `werr` for 3 edges; (6) `full` drops on the first read. Refinement for (3)/(5): in the **edge table**, a registered error pulse appears on the **same row** as the rejected request (each row's outputs are *after* its edge), while in the raw MON stream it appears **one sample later** than the request. A flag that shows up one row *early* in the table would be reacting before the edge (combinational), which is against SPEC §7.
+
+### Review 8: first real runs of TS-05 and TS-06
+
+`make summary`: `FifoWriteFullTest` **PASS** (138 edges, 64 data checks, 0 mismatches); `FifoReadEmptyTest` **FAIL** (4 mismatches). The debugging of the failure is recorded in `SOLUTIONS.md` (spoilers).

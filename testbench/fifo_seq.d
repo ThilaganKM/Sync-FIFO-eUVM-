@@ -105,3 +105,37 @@ class FifoFillDrainSeq : FifoBaseSeq
         doReads(64);
     }
 }
+
+class FifoReadEmptySeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoReadEmptySeq"){super(name);}
+
+    override void body()
+    {
+        doReset(1);
+        doReads(1);//read error expected
+        doIdle(2); //read error must drop since rd_err is 1 cycle long
+        doWrites(3);
+        doReads(6);//first 3 accepted, next three read errors expected
+        doIdle(2);//read error must drop since rd_err is 1 cycle long
+    }
+}
+
+class FifoWriteFullSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoWriteFullSeq"){super(name);}
+
+    override void body()
+    {
+        doReset(1);
+        doWrites(64);
+        doWrites(1);//rejected write due to full flag
+        doIdle(2);//dropping the wr_err flag
+        doWrites(3);//3 consecutive rejected write errors
+        doIdle(1);
+        doReads(64);//read 64 data in same order
+        doIdle(2);
+    }
+}
