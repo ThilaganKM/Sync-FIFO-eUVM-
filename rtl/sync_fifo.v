@@ -28,7 +28,7 @@ module sync_fifo #(
     output                  full,
     output                  empty,
     output reg              wr_err,
-    output                  rd_err
+    output reg              rd_err
 );
 
     localparam DEPTH = 1 << ADDR_W;
@@ -104,12 +104,14 @@ module sync_fifo #(
     // Error flags (SPEC §7): high for one cycle after a rejected request.
     //------------------------------------------------------------------
     always @(posedge clk) begin
-        if (rst)
+        if (rst) begin
             wr_err <= 1'b0;
-        else
+            rd_err <= 1'b0;
+        end
+        else begin
             wr_err <= wr_rej;
+            rd_err <= rd_rej;
+        end
     end
-
-    assign rd_err = rd_rej;
 
 endmodule
