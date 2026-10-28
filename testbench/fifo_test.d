@@ -86,3 +86,10 @@ class FifoWriteReadSimTest : FifoBaseTest
     this(string name, uvm_component parent = null) { super(name, parent); }
     override FifoBaseSeq createSeq() { return FifoWriteReadSimSeq.type_id.create("seq"); }
 }
+// TS-10: reset mid-traffic, incl. requests held during reset (SPEC §3)
+class FifoResetTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoResetSeq.type_id.create("seq"); }
+}

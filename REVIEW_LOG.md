@@ -732,3 +732,38 @@ The test class `FifoWriteReadSimTest` was added to `fifo_test.d` (on request). C
 | 6 | (c) differs from TS-06 "because of show-ahead" | ⚠️ The right clause (§6), the wrong reason. It's not about show-ahead. When full, `wr_ptr == rd_ptr`: the slot read at this edge is the slot written, so the read frees it as the write fills it, and no unread data is overwritten. TS-06 had no read on the same edge, so there was no free slot. |
 
 First run: `UVM_ERROR : 22`. Debugging recorded in `SOLUTIONS.md`.
+
+---
+
+## Design: TS-10 reset mid-traffic (before code)
+
+SPEC §3, in three parts: (1) after a reset edge, pointers are 0, `empty=1`, `full=0` and both error flags 0, from **any** level; (2) *"while `rst = 1`, `wr_en` and `rd_en` are ignored: no write, no read, no error"*; (3) the storage isn't cleared, but the FIFO is **logically** empty, so pre-reset data must never come back.
+
+The scoreboard already models this: on `prev.rst` it clears the queue and pointers **regardless of `wr_en`/`rd_en`** and expects no error pulses. TS-10 is therefore stimulus only. One new helper, `doResetWith(n, wr, rd)`, drives reset **with** requests held high.
+
+```
+doReset(2)
+(a) partly full:  doWrites(10); doReset(2); doWrites(3); doReads(3)
+(b) full:         doWrites(64); doReset(2); doWrites(3); doReads(3)
+(c) requests held during reset:
+    doWrites(5); doResetWith(3, true,  false); doReads(1)   // that read must be REJECTED
+    doWrites(5); doResetWith(3, false, true)                 // no rd_err during reset
+    doWrites(5); doResetWith(3, true,  true)
+    doWrites(3); doReads(3); doIdle(2)
+```
+
+Old data returning after a reset shows up automatically as an `rd_data` mismatch (the model is empty after reset). In (c), the `doReads(1)` after writes-during-reset is the decisive line: an empty FIFO rejects it; a FIFO that let a write slip through accepts it.
+
+### Review 10: `FifoResetSeq` (TS-10), `doResetWith`, `FifoResetTest`
+
+✅ The sequence follows the design case for case; `doResetWith(n, wr, rd)` is a correct one-line wrapper around `doCycle`. The comments say what each step expects, including the decisive rejected read after writes-during-reset. 🟢 Small layout point: `doWrites(10);//reset while partly full` puts the phase comment on the *writes* line. A comment line above each phase (`// (a) reset while partly full`) reads more clearly. `FifoResetTest` was added to `fifo_test.d` and to `TESTS` in the makefile (on request). Compiles.
+
+**Predictions** (before running):
+
+| # | Prediction | Review |
+|---|---|---|
+| 1 | After reset: all 0 except `empty=1` | ✅ pointers, `full`, `werr`, `rerr` = 0; `empty` = 1 (§3) |
+| 2 | During reset with `wr_en=1`: `wptr` stays 0 on every row, nothing is written; `wr#` doesn't matter | ✅ The table's `wr#`/`rd#` also restart at 0 on reset rows, since they count requests *since* reset |
+| 3 | The read right after writes-during-reset is rejected, `rerr` high | ✅ On that read's own row (registered pulse, §7) |
+| 4 | No `rerr` during reset with `rd_en=1`; a pulse would mean a read went through during reset | ✅ §3: "no write, no read, **no error**" |
+| 5 | "Never check `rd_data` on reset" | ⚠️ Right idea, slightly the wrong rule. The rule is **never while empty** (§3/§5), not "on reset". After a reset the FIFO is empty, so `rd_data` is undefined and may show stale bytes. But as soon as one new byte is written, `rd_data` must show **that** byte, and it **is** checked when it's consumed. The scoreboard ties the rule to its model's level, not to the reset event. |

@@ -36,6 +36,12 @@ class FifoBaseSeq : uvm_sequence!FifoItem
     void doReads(int n)     { foreach (i; 0 .. n) doCycle(false, false, true,  format("read cycle %d", i)); }
     void doReadWrite(int n) { foreach (i; 0 .. n) doCycle(false, true,  true,  format("read+write cycle %d", i)); }
     void doIdle(int n)      { foreach (i; 0 .. n) doCycle(false, false, false, format("idle cycle %d", i)); }
+    void doResetWith(int n, bool wr, bool rd)
+    {
+        foreach (i; 0 .. n)
+            doCycle(true, wr, rd, format("reset cycle %d (wr=%b rd=%b)", i, wr, rd));
+    }
+
 }
 
 class FifoSmokeSeq : FifoBaseSeq
@@ -156,6 +162,40 @@ class FifoWriteReadSimSeq : FifoBaseSeq
         doWrites(64);
         doReadWrite(4);//when fifo full, read and write on the same edge
         doReads(64);//drain the fifo
+        doIdle(2);
+    }
+}
+
+class FifoResetSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoResetSeq"){super(name);}
+
+    override void body()
+    {
+        doReset(2);//reset initially
+
+        doWrites(10);//reset while partly full
+        doReset(2);
+        doWrites(3);
+        doReads(3);//check for fresh data comes back, if old bytes come then error
+
+        doWrites(64);//reset while full
+        doReset(2);
+        doWrites(3);//check for fresh data comes back, if old bytes come then error
+        doReads(3);
+
+        doWrites(5);
+        doResetWith(3,true,false);//reset while writes
+        doReads(1);/*rerr goes high, if the FIFO really ignored those writes, 
+                   it's empty and this read must be rejected. If any write 
+                   slipped through, the read would succeed.*/   
+        doWrites(5);
+        doResetWith(3,false, true);//reset while read
+        doWrites(5);
+        doResetWith(3,true,true);//reset during read and write
+        doWrites(3);
+        doReads(3);
         doIdle(2);
     }
 }

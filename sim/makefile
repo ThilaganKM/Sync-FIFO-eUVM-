@@ -40,7 +40,7 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
 # Tests and logs
 # ---------------------------------------------------------------
 # Every test class in fifo_test.d. `make regress` runs them all.
-TESTS = FifoTest FifoFillDrainTest FifoReadEmptyTest FifoWriteFullTest FifoWriteReadSimTest
+TESTS = FifoTest FifoFillDrainTest FifoReadEmptyTest FifoWriteFullTest FifoWriteReadSimTest FifoResetTest
 
 # Each run's log is named after its test and seed: logs/<Test>_s<seed>.log
 # (fifo_test.FifoTest -> FifoTest), so a log name always says what produced it.
