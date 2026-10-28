@@ -767,3 +767,39 @@ Old data returning after a reset shows up automatically as an `rd_data` mismatch
 | 3 | The read right after writes-during-reset is rejected, `rerr` high | ✅ On that read's own row (registered pulse, §7) |
 | 4 | No `rerr` during reset with `rd_en=1`; a pulse would mean a read went through during reset | ✅ §3: "no write, no read, **no error**" |
 | 5 | "Never check `rd_data` on reset" | ⚠️ Right idea, slightly the wrong rule. The rule is **never while empty** (§3/§5), not "on reset". After a reset the FIFO is empty, so `rd_data` is undefined and may show stale bytes. But as soon as one new byte is written, `rd_data` must show **that** byte, and it **is** checked when it's consumed. The scoreboard ties the rule to its model's level, not to the reset event. |
+
+---
+
+## Design: TS-11 constrained random (before code)
+
+Verified first in a scratch probe: `randomizeWith` with **two** `dist` constraints and `$0..$3` weight parameters works (ratios 0.695 / 0.322 for 70 / 30); runs are **reproducible** per `+seed`, `urandom()` included; and a run without a reset trips the scoreboard's `edges_checked=0` guard.
+
+New helper for `FifoBaseSeq`:
+
+```d
+// n random cycles: wr_en with probability wrPct %, rd_en with rdPct % (independently),
+// and a reset cycle with probability rstPerMille / 1000 (wr/rd stay random during it).
+void doRandom(int n, int wrPct, int rdPct, int rstPerMille)
+```
+
+Sequence: `doReset(2)` (required), then three 2000-cycle phases: **fill-biased** 70/30 (lives near full: rejected writes, read+write at full), **drain-biased** 30/70 (lives near empty: rejected reads, read+write at empty), **balanced** 50/50 (mid levels, many wrap-arounds). Rare resets (2/1000 per cycle) with random requests during them. Run over many seeds with `make seeds`.
+
+### Review 11: `doRandom` and `FifoRandomSeq` (TS-11)
+
+✅ A reset first; three 2000-cycle phases with the planned biases (70/30, 30/70, 50/50), 6000 cycles total; `doRandom` exactly as verified. 🟡 Two comments say "resets 2%" while the argument is **per mille**: `2` = 2/1000 = **0.2 %** (the first comment correctly says 2‰). A comment that disagrees with the code by 10× misleads the next reader. 🟢 Naming each phase's purpose (`// fill-biased: lives near full`) beats repeating its numbers. `FifoRandomTest` was added to `fifo_test.d` and to `TESTS` (on request). Compiles.
+
+---
+
+## `fifo_coverage.d` and `make coverage`: written by the reviewer on request
+
+`FifoCoverage` is the second subscriber on `mon_analysis_port` (env: `agent.monitor.mon_analysis_port.connect(coverage.mon_analysis_imp)`). It pairs `prev`/`cur` like the scoreboard, starts sampling after the first reset (`valid`), and samples one covergroup with 6 coverpoints / 38 bins (VERIFICATION_PLAN §5). Design choices:
+
+| Choice | Why |
+|---|---|
+| Level from the DUT's outputs (`full` → 64, else `(wr_ptr − rd_ptr) & 63`) | Coverage records what the DUT experienced; it's trustworthy because the scoreboard checks those same outputs every edge |
+| `-1` for "not applicable on this edge" | Values outside every bin aren't counted: a reset edge doesn't count as an op, a normal edge doesn't count as a reset |
+| A combined-value coverpoint instead of `cross` | esdl's per-bin report crashes on `cross` |
+| `werrTr = prev*2 + cur` | One coverpoint distinguishes a pulse **rising** (0→1) from a pulse **held** (1→1, consecutive rejects) |
+| YAML between `COVERAGE-BEGIN/END` | Machine-readable, so `logview.py --coverage` can merge any number of runs |
+
+Smoke-test sanity check: writes at levels 0→1→2→3 hit `empty_wr`, `one_wr`, `mid_wr` ×2; reads back down hit `mid_rd` ×3, `one_rd`; matches by hand.

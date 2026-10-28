@@ -41,6 +41,22 @@ class FifoBaseSeq : uvm_sequence!FifoItem
         foreach (i; 0 .. n)
             doCycle(true, wr, rd, format("reset cycle %d (wr=%b rd=%b)", i, wr, rd));
     }
+    // n random cycles: wr_en true with probability wrPct %, rd_en with rdPct %
+    // (independently), and a reset cycle with probability rstPerMille / 1000.
+    void doRandom(int n, int wrPct, int rdPct, int rstPerMille)
+    {
+        foreach (i; 0 .. n) {
+            req = FifoItem.type_id.create("req");
+            start_item(req);
+            req.randomizeWith!q{ wr_en dist [true := $0, false := $1];
+                                 rd_en dist [true := $2, false := $3]; }
+                             (wrPct, 100 - wrPct, rdPct, 100 - rdPct);
+            req.rst = urandom(0, 1000) < rstPerMille;
+            uvm_info("SEQ", format("random cycle %d: %s", i, req.convert2string()), UVM_HIGH);
+            finish_item(req);
+        }
+    }
+
 
 }
 
@@ -196,6 +212,21 @@ class FifoResetSeq : FifoBaseSeq
         doResetWith(3,true,true);//reset during read and write
         doWrites(3);
         doReads(3);
+        doIdle(2);
+    }
+}
+
+class FifoRandomSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoRandomSeq"){super(name);}
+    
+    override void body()
+    {
+        doReset(1);
+        doRandom(2000,70,30,2);//2000 cycles,70% writes,30% reads,resets 2‰
+        doRandom(2000,30,70,2);//2000 cycles,30% writes,70% reads,resets 2%
+        doRandom(2000,50,50,2);//2000 cycles,50% writes,50% reads,resets 2%
         doIdle(2);
     }
 }

@@ -16,6 +16,7 @@ TB_SRC  = ../testbench/$(TOP).d \
           ../testbench/fifo_driver.d \
           ../testbench/fifo_monitor.d \
           ../testbench/fifo_scoreboard.d \
+          ../testbench/fifo_coverage.d \
           ../testbench/fifo_agent.d \
           ../testbench/fifo_env.d \
           ../testbench/fifo_test.d
@@ -40,7 +41,7 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
 # Tests and logs
 # ---------------------------------------------------------------
 # Every test class in fifo_test.d. `make regress` runs them all.
-TESTS = FifoTest FifoFillDrainTest FifoReadEmptyTest FifoWriteFullTest FifoWriteReadSimTest FifoResetTest
+TESTS = FifoTest FifoFillDrainTest FifoReadEmptyTest FifoWriteFullTest FifoWriteReadSimTest FifoResetTest FifoRandomTest
 
 # Each run's log is named after its test and seed: logs/<Test>_s<seed>.log
 # (fifo_test.FifoTest -> FifoTest), so a log name always says what produced it.
@@ -48,7 +49,7 @@ LOGDIR   = logs
 TESTNAME = $(lastword $(subst ., ,$(TEST)))
 RUNLOG   = $(LOGDIR)/$(TESTNAME)_s$(SEED).log
 
-.PHONY: all run regress view table summary clean cleanlogs
+.PHONY: all run regress seeds view table summary coverage clean cleanlogs
 
 # If a recipe fails, delete its target (e.g. verilator.stamp), so a failed
 # step is never mistaken for a finished one on the next make.
@@ -75,6 +76,17 @@ regress: $(TOP)
 	done
 	@$(MAKE) --no-print-directory summary
 
+# One test over several seeds (random tests), then the summary table.
+#   make seeds TEST=fifo_test.FifoRandomTest                  (seeds 1..10)
+#   make seeds TEST=fifo_test.FifoRandomTest SEEDS="11 12 13"
+SEEDS ?= 1 2 3 4 5 6 7 8 9 10
+seeds: $(TOP)
+	@for s in $(SEEDS); do \
+	    echo "running $(TESTNAME) (seed $$s) -> $(LOGDIR)/$(TESTNAME)_s$$s.log"; \
+	    $(MAKE) --no-print-directory run TEST=$(TEST) SEED=$$s > /dev/null; \
+	done
+	@$(MAKE) --no-print-directory summary
+
 # Views of a saved log (see logview.py). LOG defaults to the most recent log.
 #   make view                                   stream view of the latest run
 #   make table LOG=logs/FifoWriteFullTest_s1.log
@@ -91,6 +103,10 @@ table:
 # Regression summary: one PASS/FAIL line per log in logs/.
 summary:
 	@python3 logview.py --color --summary $(sort $(wildcard $(LOGDIR)/*.log))
+
+# Functional coverage merged over every PASSING log in logs/, with the holes.
+coverage:
+	@python3 logview.py --color --coverage $(sort $(wildcard $(LOGDIR)/*.log))
 
 # Build products only. Logs are kept: delete them with `make cleanlogs`.
 clean:

@@ -89,18 +89,19 @@ These run in the scoreboard on every edge. They're independent of the stimulus, 
 
 ## 5. Functional coverage
 
-Covergroup sampled once per edge, from the monitor snapshot plus the model level before the edge.
+Implemented in `testbench/fifo_coverage.d` (`FifoCoverage`), a second subscriber on the monitor's analysis port. It pairs consecutive samples like the scoreboard and samples **one esdl covergroup per edge**. Merged across all passing logs with `make coverage`.
 
-| Coverpoint / cross | Bins | Why |
-|---|---|---|
-| `cp_level` | 0, 1, 2–62, 63, 64 | The boundaries are where FIFOs break. |
-| `cp_op` | idle, write only, read only, read + write | Every request type. |
-| **`cx_level_op`** | `cp_level` × `cp_op` (all 20 bins) | Covers every row of SPEC §6 and every reject case. |
-| `cp_wr_err`, `cp_rd_err` | 0, 1, transition 1 ⇒ 1 | Single and consecutive error pulses. |
-| `cp_wrap` | `wr_ptr` 63 ⇒ 0, `rd_ptr` 63 ⇒ 0 | Wrap-around happened on both pointers. |
-| `cp_reset` | reset at level {0, mid, 64} × {`wr_en`, `rd_en`, both, neither} during reset | Mid-traffic reset combinations. |
+| Coverpoint | Bins | Why | # |
+|---|---|---|---|
+| `lvlop` (level × op cross) | level **before** the edge {empty, one, 2–62, 63, full} × op {idle, wr, rd, rw}, non-reset edges | Every SPEC §6 row and every reject case, at every boundary | 20 |
+| `werrTr`, `rerrTr` | `*_err_rise` (0→1), `*_err_held` (1→1, consecutive rejects) | §7 single and consecutive pulses | 4 |
+| `wrWrap`, `rdWrap` | `wr_ptr_63_to_0`, `rd_ptr_63_to_0` on non-reset edges | §4 wrap-around of both pointers | 2 |
+| `rstCase` | level before reset {empty, 1–63, full} × requests during reset {none, wr, rd, both} | §3 reset from every level, with and without requests | 12 |
+| **Total** | | | **38** |
 
-**Code coverage:** Verilator `--coverage` (line and toggle) on the DUT, as a secondary metric.
+The cross is a coverpoint on a combined value (`levelBin * 4 + op`) because esdl's per-bin report crashes on `cross` (see FAQ). The level comes from the DUT's outputs (`full` → 64, else `(wr_ptr − rd_ptr) mod 64`), which is valid because the scoreboard independently checks those outputs; coverage only counts passing runs.
+
+**Code coverage:** Verilator `--coverage` (line and toggle) on the DUT, as a secondary metric (not yet enabled).
 
 ---
 

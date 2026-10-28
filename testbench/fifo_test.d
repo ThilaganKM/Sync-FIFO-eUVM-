@@ -93,3 +93,10 @@ class FifoResetTest : FifoBaseTest
     this(string name, uvm_component parent = null) { super(name, parent); }
     override FifoBaseSeq createSeq() { return FifoResetSeq.type_id.create("seq"); }
 }
+// TS-11: constrained random, 3 biased phases + rare random resets (run over many seeds)
+class FifoRandomTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoRandomSeq.type_id.create("seq"); }
+}

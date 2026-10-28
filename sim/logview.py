@@ -12,6 +12,8 @@ This script only changes how it is *displayed*. Three views:
                      scoreboard's verdict for that edge (errors listed below
                      their row; changed outputs highlighted)
   --summary          one line per log file: test, seed, check counts, PASS/FAIL
+  --coverage         functional coverage merged over all PASSING logs: every bin,
+                     its hits, how many runs hit it, and the HOLES (bins never hit)
 
 Usage:
   python3 logview.py run.log                         # stream view
@@ -20,6 +22,7 @@ Usage:
   python3 logview.py --table --errors-only run.log   # every error, with context
   python3 logview.py --table --around 1300 run.log   # edges near 1300 ns
   python3 logview.py --summary *.log                 # regression summary
+  python3 logview.py --coverage logs/*.log           # merged coverage + holes
   python3 logview.py --color ... | less -R           # page, keeping colours
 
   (make view / make table / make summary wrap these; see the makefile.)
@@ -468,6 +471,105 @@ def summary_view(files):
     print(c(f"{n_pass}/{n_runs} runs passed", "bold", "green" if n_pass == n_runs else "red"))
 
 
+# --------------------------------------------------------------------------
+# --coverage: merge functional coverage bins across log files
+# --------------------------------------------------------------------------
+def parse_coverage(lines):
+    """Per-bin hit counts from the COVERAGE-BEGIN/END block of one log:
+    {coverpoint: {bin: hits}} in declaration order, or None if there's no block."""
+    cov, cp, in_block, in_bins, cur_bin = {}, None, False, False, None
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if line.startswith("COVERAGE-BEGIN"):
+            in_block, cov = True, {}
+            continue
+        if line.startswith("COVERAGE-END"):
+            return cov
+        if not in_block:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        text = line.strip()
+        if indent == 4 and text.endswith(":"):
+            cp = text[:-1].strip()
+            cov[cp] = {}
+            in_bins = False
+        elif indent == 6 and text == "bins:":
+            in_bins = True
+        elif in_bins and indent == 8 and text.endswith(":"):
+            cur_bin = text[:-1]
+            cov[cp][cur_bin] = 0
+        elif in_bins and indent == 10 and cur_bin is not None and ":" in text:
+            cov[cp][cur_bin] += int(text.rsplit(":", 1)[1])
+    return None
+
+
+def coverage_view(files):
+    merged, order, runs_hit, best = {}, [], {}, {}
+    used, skipped = [], []
+    for f in files:
+        try:
+            with open(f) as fh:
+                lines = fh.readlines()
+        except OSError as err:
+            print(c(f"{f}: {err.strerror}", "red"))
+            continue
+        _m, _e, meta = parse_log(lines)
+        label, _style = verdict(meta)
+        cov = parse_coverage(lines)
+        name = os.path.basename(f)
+        if cov is None:
+            skipped.append((name, "no coverage block"))
+            continue
+        if label != "PASS":
+            skipped.append((name, label))           # coverage only counts for passing runs
+            continue
+        used.append(name)
+        test = (meta["test"] or "?").replace("fifo_test.", "")
+        for cp, bins in cov.items():
+            if cp not in merged:
+                merged[cp] = {}
+                order.append(cp)
+            for b, hits in bins.items():
+                merged[cp][b] = merged[cp].get(b, 0) + hits
+                if hits:
+                    runs_hit[(cp, b)] = runs_hit.get((cp, b), 0) + 1
+                    if hits > best.get((cp, b), ("", 0))[1]:
+                        best[(cp, b)] = (test, hits)
+
+    print(c(f"Functional coverage merged over {len(used)} passing run(s)", "bold"))
+    for name, why in skipped:
+        print(c(f"  not counted: {name} ({why})", "yellow"))
+    if not merged:
+        print(c("No coverage data found (were the runs built with fifo_coverage.d?)", "red"))
+        return
+
+    total = hit = 0
+    holes = []
+    for cp in order:
+        bins = merged[cp]
+        n_hit = sum(1 for v in bins.values() if v)
+        total += len(bins)
+        hit += n_hit
+        pct = 100.0 * n_hit / len(bins) if bins else 0
+        style = ("bold", "green") if n_hit == len(bins) else ("bold", "yellow")
+        print()
+        print(c(f"{cp}  {n_hit}/{len(bins)} bins  ({pct:.0f} %)", *style))
+        print(c(f"  {'bin':<18} {'hits':>8} {'runs':>5}  most hits from", "grey"))
+        for b, v in bins.items():
+            if v:
+                t, n = best[(cp, b)]
+                print(f"  {b:<18} {v:>8} {runs_hit[(cp, b)]:>5}  " + c(f"{t} ({n})", "grey"))
+            else:
+                holes.append(f"{cp}.{b}")
+                print(c(f"  {b:<18} {'HOLE':>8} {0:>5}", "bold", "red"))
+    print()
+    pct = 100.0 * hit / total if total else 0
+    style = ("bold", "green") if hit == total else ("bold", "red")
+    print(c(f"TOTAL: {hit}/{total} bins hit ({pct:.1f} %)", *style))
+    if holes:
+        print(c("Holes: " + ", ".join(holes), "red"))
+
+
 def main():
     global USE_COLOR
     ap = argparse.ArgumentParser(description="Debug-friendly views of a UVM run log.")
@@ -477,6 +579,7 @@ def main():
     ap.add_argument("--no-headers", action="store_true")
     ap.add_argument("--table", action="store_true", help="one row per rising edge")
     ap.add_argument("--summary", action="store_true", help="one line per log file")
+    ap.add_argument("--coverage", action="store_true", help="merge coverage bins across logs")
     ap.add_argument("--errors-only", action="store_true")
     ap.add_argument("--first-error", action="store_true")
     ap.add_argument("--around", type=float, default=None, metavar="NS")
@@ -490,6 +593,9 @@ def main():
     try:
         if a.summary:
             summary_view(a.logfile)
+            return
+        if a.coverage:
+            coverage_view(a.logfile)
             return
         if len(a.logfile) > 1:
             ap.error("give one log file (several only with --summary)")

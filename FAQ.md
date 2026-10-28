@@ -47,6 +47,9 @@ Nothing here gives away anything about bugs in the RTL.
   - [How does the top file's clock line up the DUT, the driver and the monitor?](#how-does-the-top-files-clock-line-up-the-dut-the-driver-and-the-monitor)
   - [Why `"uvm_test_top*"` and not `"uvm_test_top.*"` in `uvm_config_db::set`?](#why-uvm_test_top-and-not-uvm_test_top-in-uvm_config_dbset)
   - [Why are the files and classes named `fifo_intf` / `FifoIntf`?](#why-are-the-files-and-classes-named-fifo_intf--fifointf-not-interface--intf-as-in-the-comparator)
+  - [How do I measure and merge coverage?](#how-do-i-measure-and-merge-coverage)
+  - [How do I write functional coverage (covergroups) in eUVM?](#how-do-i-write-functional-coverage-covergroups-in-euvm)
+  - [How do random tests work here, and are they reproducible?](#how-do-random-tests-work-here-and-are-they-reproducible)
   - [Why does randomizing an item crash with `Illegal instruction`?](#why-does-randomizing-an-item-crash-with-illegal-instruction)
   - [The compiler printed many errors. Where do I start?](#the-compiler-printed-many-errors-where-do-i-start)
   - [How do `ubvec` values behave with integers and `format`?](#how-do-ubvec-values-behave-with-integers-and-format)
@@ -770,6 +773,77 @@ The D standard library (Phobos) style, which is what most D code follows:
 The comparator didn't follow this. The FIFO testbench does, from the first file onwards, so the linter output stays clean and any warning means something.
 
 Exception: names fixed by UVM or by generated code keep their own style (`uvm_test`, `uvm_config_db`, `DVsync_fifo`, `build_phase`).
+
+### How do I measure and merge coverage?
+
+```bash
+cd sim
+make regress                                   # every test, seed 1
+make seeds TEST=fifo_test.FifoRandomTest       # random test, seeds 1..10
+make coverage                                  # merged coverage of every PASSING log in logs/
+```
+
+`make coverage` prints each coverpoint with every bin: total **hits**, how many **runs** hit it, and which test contributed the most hits. Bins never hit are shown as **HOLE**, then a total (`TOTAL: n/38 bins hit`) and the list of holes.
+
+How it works: `FifoCoverage` (testbench) samples an esdl covergroup on every edge and, in `report_phase`, writes the per-bin counts into the log between `COVERAGE-BEGIN` / `COVERAGE-END`, with a one-line `[COV] functional coverage x %` summary. `logview.py --coverage` adds the counts up across logs.
+
+Rules built into the merge:
+- **Only passing runs count.** A failing run's coverage is listed as "not counted": a situation the DUT got wrong hasn't been *verified* just because it happened.
+- Coverage is the union over the whole regression: one test may hit the full-level bins and another the reset bins.
+
+What to do with a hole: work out **why** the stimulus never produced that situation (too rare? never generated at all?), then add stimulus that targets it: a directed test, or new random weights. Rerun, and the hole should close. Coverage tells you where the testing is weak; it doesn't tell you the design is correct (that's the scoreboard's job).
+
+### How do I write functional coverage (covergroups) in eUVM?
+
+eUVM's `esdl.cover` has SystemVerilog-style covergroups. The syntax differs from SV in a few places, found by trial on beta61:
+
+```d
+class FifoCoverage : uvm_component        // or any class
+{
+    int lvlop;                            // the value(s) to cover: class members
+
+    class CG : covergroup!q{
+        coverpoint lvlop {
+            bins e_idle = [0];            // SQUARE brackets (SV uses { })
+            bins mid    = [2:62];         // a range
+        }
+    } { this(string n, string h = "") { super(n, h); } }   // body + 2-arg constructor required
+
+    CG cg;
+    ...  cg = new CG("cg");               // create
+    ...  lvlop = ...; cg.sample();        // sample: set the members, then call sample()
+    ...  cg.get_coverage();               // 0.0 .. 1.0
+    ...  cg.get_cover_yaml_string();      // per-bin hit counts (what you need to find holes)
+}
+```
+
+| Gotcha | Error you get | Fix |
+|---|---|---|
+| `class CG : covergroup!q{...}` with no body | `{ } expected following class declaration` | Add a class body `{ ... }` after the `q{...}` |
+| SV-style bins `{0}` / `{[2:62]}` | `expected ';' but found {0}; ...` | `[0]`, `[2:62]` |
+| No constructor, or `this(string n)` | `cannot implicitly generate a default constructor` / `not callable using argument types (string, string)` | `this(string n, string h = "") { super(n, h); }` |
+| A `cross` in the covergroup | `get_coverage()` works, but `get_cover_yaml_string()` **crashes**: `ArrayIndexError ... Cross._esdl__getName` | Build the cross as **one coverpoint on a combined value**, e.g. `lvlop = levelBin * 4 + op` with one named bin per combination |
+
+Without per-bin output you can only see a percentage, not *which* bins are missing. That's why the crash matters, and why the combined-value workaround is worth it.
+
+### How do random tests work here, and are they reproducible?
+
+**Weights in the sequence, not the item.** `randomizeWith` accepts inline constraints, including `dist` (weighted choice), with **parameters** passed as `$0`, `$1`, …:
+
+```d
+req.randomizeWith!q{ wr_en dist [true := $0, false := $1];
+                     rd_en dist [true := $2, false := $3]; }(wrPct, 100 - wrPct, rdPct, 100 - rdPct);
+```
+
+Tested: weights 70/30 gave measured ratios of 0.695 / 0.322 over 1000 draws. (Keep `dist` out of the **item class** itself, see the `Illegal instruction` entry.)
+
+**Other random decisions:** `urandom(min, max)` from `esdl` returns an integer in `[min, max)`, e.g. `urandom(0, 1000) < 2` is true about 2 times in 1000.
+
+**Reproducible by seed.** All of it follows `+seed=N` (set by `make run SEED=N`). Tested: seed 1 run twice gave byte-identical data, and seed 2 gave different data. So a failing random run is debugged by rerunning **the same test with the same seed**. As noted earlier, editing the stimulus code changes which random numbers go where, so a seed only reproduces a run of the *same* code.
+
+**Many seeds:** `make seeds TEST=fifo_test.<RandomTest>` runs seeds 1–10 (or `SEEDS="11 12 13"`) and prints the summary. Each seed is a different random scenario, and the scoreboard checks every one of them.
+
+**Start every random test with a reset.** The scoreboard can't predict anything until the first reset (the DUT's state is undefined before it). A probe that skipped the reset got `edges_checked=0` and the scoreboard's guard error: `no edges were checked (was reset ever applied?)`.
 
 ### Why does randomizing an item crash with `Illegal instruction`?
 
