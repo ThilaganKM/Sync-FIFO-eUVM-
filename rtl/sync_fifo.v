@@ -68,8 +68,7 @@ module sync_fifo #(
     always @(posedge clk) begin
         if (rst)
             wr_ptr <= {ADDR_W{1'b0}};
-
-        if (wr_acc) begin
+        else if (wr_acc) begin
             mem[wr_ptr] <= wr_data;
             wr_ptr      <= wr_ptr + 1'b1;
         end

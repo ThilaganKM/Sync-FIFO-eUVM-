@@ -202,6 +202,67 @@ Writes and reads aren't symmetric in this spec. A simultaneous **read** really d
 
 ---
 
+## Bug 4: `wr_ptr` advances during reset when `wr_en` is high
+
+**Found by:** `FifoResetTest` (TS-10), seed 1. Cases (a) reset while partly full and (b) reset while full **pass**; case (c), reset held for 3 cycles **with `wr_en = 1`**, fails.
+
+**Result:** `edges_checked=125 ... mismatches=23`: 20 × `wr_ptr`, 3 × `rd_data`.
+
+**First error** (`make table ARGS=--first-error`):
+```
+ c096    1950 │ WRITE   0  1  0    0b   8   3 │      d8 │   08   03    0     0    0    0 │ ✓
+ c097    1970 │ RESET   1  1  0    4d   0   0 │      d8 │   09   00    0     1    0    0 │ ✗ wr_ptr: exp 0 got 9
+ c098    1990 │ RESET   1  1  0    9f   0   0 │      af │   10   00    0     1    0    0 │ ✗ wr_ptr: exp 0 got 10
+ c099    2010 │ RESET   1  1  0    df   0   0 │      af │   11   00    0     1    0    0 │ ✗ wr_ptr: exp 0 got 11
+ c100    2030 │ READ    0  0  1    7e   0   1 │      af │   11   00    0     1    0    1 │ ✗ wr_ptr: exp 0 got 11
+```
+
+**Reading it.** On every reset row with `wr_en = 1`, `wptr` **advances** (8 → 9 → 10 → 11), as if the write were accepted, instead of going to 0. On the same rows, `rptr` → 0, `empty` → 1 and the error flags stay 0, all as §3 requires. Only the write pointer lets a write request override reset. Row c100's read is correctly rejected (the FIFO reports empty), but its write pointer has moved on: inconsistent internal state.
+
+**Consequence: stale data returned.** The final `doWrites(3); doReads(3)` store the new bytes at slots 11+, while the reads come from slots 0–2, which still hold pre-reset data:
+```
+ c120    2430 │ READ ... │  27 │ ... │ ✗ rd_data: exp 62 got 27
+ c121    2450 │ READ ... │  6a │ ... │ ✗ rd_data: exp aa got 6a
+ c122    2470 │ READ ... │  b9 │ ... │ ✗ rd_data: exp 3d got b9
+```
+3 stale bytes come back and 3 new ones are lost: the most serious violation of §3 ("logically empty"; old data must never be read).
+
+**Testbench or RTL?** The model follows §3 literally (on a reset edge: clear the queue and pointers, ignore `wr_en`/`rd_en`, no error pulses), and the same model passes (a), (b) and every other test. **Verdict: RTL bug**, violating §3 (`wr_ptr = 0` after reset; `wr_en` ignored while `rst = 1`; pre-reset contents never returned).
+
+The user's diagnosis: "on reset, along with `wr_en`, `wr_ptr` still increments and doesn't go to 0". Correct. The table adds that it's write-side only, and the `rd_data` errors show the user-visible damage.
+
+**Root cause (from the designer's side):** the write block used two **independent** `if` statements:
+
+```verilog
+always @(posedge clk) begin
+    if (rst)
+        wr_ptr <= 0;
+    if (wr_acc) begin              // evaluated even when rst = 1
+        mem[wr_ptr] <= wr_data;
+        wr_ptr      <= wr_ptr + 1'b1;
+    end
+end
+```
+
+In a Verilog `always` block, when two non-blocking assignments to the same register execute in one edge, **the last one wins**. With `rst = 1` and `wr_en = 1`, both run, and `wr_ptr <= wr_ptr + 1` overrides `wr_ptr <= 0`. The memory write also goes through during reset. The read pointer's block uses `if (rst) … else if (rd_acc) …`, so it was correct: the asymmetry is the tell-tale sign, as with bug 2.
+
+**Fix:** give reset priority with `else if`:
+
+```diff
+         if (rst)
+             wr_ptr <= {ADDR_W{1'b0}};
+-
+-        if (wr_acc) begin
++        else if (wr_acc) begin
+             mem[wr_ptr] <= wr_data;
+             wr_ptr      <= wr_ptr + 1'b1;
+         end
+```
+
+**Regression** (`make regress`, seed 1): 6/6 PASS. `FifoResetTest`: 125 edges, 9 data checks, 0 mismatches. During reset with `wr_en=1`, `wptr` now stays 0; the final reads return the new bytes `62 aa 3d`. **Status: fixed.**
+
+---
+
 ## Student questions
 
 Questions raised while debugging, with the answers.
@@ -214,3 +275,4 @@ Questions raised while debugging, with the answers.
 6. **"Is it a monitor sampling-time issue? The monitor samples the combinational pulse and mistakes it for the previous edge's output?"** No. The monitor reports exactly what the port shows. At 40 ns the DUT really shows `rd_err = 1` before any edge has rejected a read. A **registered** output is stable for the whole cycle between edges, so any mid-cycle sample point reads it correctly (that's why `wr_err` passes). Only a signal that changes *between* edges can look early, and that's precisely the §7 violation. Moving the sample point would hide the errors without fixing the DUT: changing the checker to match the DUT.
 7. **"Even for the rejected read, `rd_ptr` increments."** More precisely, the DUT **didn't** reject it: `rd_ptr` advancing, `rd_err` staying 0 and the level staying 0 are what an *accepted* read looks like. The bug is the acceptance decision (the read accepted at empty because a write happened on the same edge), not a pointer update on a rejected read.
 8. **"`empty` went back to 0 at c003 because `rd_ptr == wr_ptr` is no longer true."** After the bug-1 fix, `empty` comes from the entry **count**, not from comparing pointers. At c003 the DUT's level is 1 and the model's is 2: both non-zero, so `empty` agrees, but the levels still differ by one. That's why the `rd_ptr` mismatch continues. A mismatch disappearing doesn't mean the DUT has recovered.
+9. **"Even on reset, `wr_ptr` is not resetting to 0."** Correct, and slightly more: `wr_ptr` **advanced** on each reset edge (8 → 9 → 10 → 11), as if the write were accepted, while `rd_ptr`, `empty` and the error flags did reset. Comparing the write side with the read side, as with the two error flags in bug 2, localises the bug. And the user-visible damage is in the later `rd_data` errors: stale pre-reset bytes returned.
