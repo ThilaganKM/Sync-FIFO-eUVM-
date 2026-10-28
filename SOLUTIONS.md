@@ -151,6 +151,57 @@ TS-05 now shows `rd_err = 1` on exactly the rejected-read rows (c001, c010–c01
 
 ---
 
+## Bug 3: at empty, a read on the same edge as a write is accepted (write-through)
+
+**Found by:** `FifoWriteReadSimTest` (TS-08), seed 1: reset; (a) read+write at empty; idle; 2 writes; (b) 4 read+writes at level 3; 3 reads; 64 writes; (c) 4 read+writes at full; 64 reads.
+
+**Result:** `edges_checked=146 data_checks=75 ... mismatches=22`, errors only between 60 and 260 ns. By kind: 10 × `rd_ptr`, 7 × `rd_data`, 3 × `empty`, 2 × `rd_err`.
+
+**First error** (`make table ARGS=--first-error`):
+```
+ c000      30 │ RESET   1  0  0    cc   0   0 │      00 │   00   00    0     1    0    0 │ ✓
+ c001      50 │ R+W     0  1  1    92   1   1 │      00 │   01   01    0     1    0    0 │ ✗ rd_ptr: exp 0 got 1 (+2)
+               └─ ERROR @60 ns [SCB] rd_ptr mismatch: expected=0 got=1
+               └─ ERROR @60 ns [SCB] empty mismatch: expected=0 got=1
+               └─ ERROR @60 ns [SCB] rd_err mismatch: expected=1 got=0
+ c002      70 │ IDLE    0  0  0    23   1   1 │      00 │   01   01    0     1    0    0 │ ✗ rd_ptr: exp 0 got 1 (+1)
+ c003      90 │ WRITE   0  1  0    68   2   1 │      00 │   02   01    0     0    0    0 │ ✗ rd_ptr: exp 0 got 1
+```
+
+**Reading it.** At empty, with `wr_en = rd_en = 1`:
+
+| After the c001 edge | Expected (§6 empty row) | DUT |
+|---|---|---|
+| `wptr` | 1 (write accepted) | 1 |
+| `rptr` | 0 (read **rejected**) | **1** |
+| `empty` | 0 (level 1) | **1** (level 0) |
+| `rerr` | 1 | **0** |
+
+`rptr` advancing, no `rerr` and the level staying 0 are the signature of an **accepted** read. The DUT stored `0x92` and consumed it on the same edge, so it never appeared on `rd_data`: a **write-through**, forbidden by §5. Byte `0x92` is lost.
+
+**Why 22 errors, and why they stop.** One byte offset: the DUT's level is one lower than the model's from c001 on. Every byte read in phase (b) is one position ahead of the model (7 × `rd_data`), and `rd_ptr` is one ahead (10 ×). `empty` disagrees until both levels are non-zero. During the drain, the DUT runs empty **one read early** and rejects a read that the model accepts (the second `rd_err` mismatch). That extra rejection cancels the extra acceptance at c001: pointers and levels realign, and phase (c) at full and the final drain pass.
+
+**Testbench or RTL?** The model follows §6 row by row (`rdAcc = rd_en && count > 0`, independent of `wr_en`), and its (c) behaviour at full, also from §6, passes. The DUT violates §5 (no write-through), §6 (empty row: read rejected) and §7 (an `rd_err` pulse for the rejected read). **Verdict: RTL bug.**
+
+**Root cause (from the designer's side):** the read-acceptance condition mirrored the write-acceptance one:
+
+```verilog
+wire wr_acc = wr_en && (!full  || rd_en);   // correct: at full, a read frees a slot (§6)
+wire rd_acc = rd_en && (!empty || wr_en);   // WRONG: at empty, a write does NOT make data readable (§5)
+```
+
+Writes and reads aren't symmetric in this spec. A simultaneous **read** really does free a slot for a write at full, but a simultaneous **write** doesn't produce readable data at empty (no write-through). Copying the write rule's shape into the read rule created the bug.
+
+**Fix:**
+```diff
+-    wire rd_acc = rd_en && (!empty || wr_en);
++    wire rd_acc = rd_en && !empty;
+```
+
+**Regression** (`make regress`, seed 1): 5/5 PASS, `FifoWriteReadSimTest` 146 edges, 75 data checks, 0 mismatches. Row c001 now shows `wptr=01 rptr=00 empty=0 rerr=1`, and `0x92` appears on `rd_data` from the next row. **Status: fixed.**
+
+---
+
 ## Student questions
 
 Questions raised while debugging, with the answers.
@@ -161,3 +212,5 @@ Questions raised while debugging, with the answers.
 4. **"`wr_ptr` is 6 bits and is already 63 at the 63rd write. How can it reach 64 for the 64th? Shouldn't the rule be `wr_ptr=63` → full?"** No. `wr_ptr` is the **next** slot to write (§2), so `wr_ptr=63` after 63 writes means slot 63 is still free. The 64th write goes into slot 63, then `wr_ptr` wraps to 0 (§4). It never needs to be 64. A rule based on `wr_ptr` can't work, because `wr_ptr = rd_ptr = 0` both before the first write (empty) and after the 64th (full). §2's note says so explicitly: the RTL must track the 0-vs-64 distinction internally (a counter or an extra pointer bit). That's exactly the kind of internal detail a black-box test can't see, but whose mistakes show up at the ports, as here: full at 63, and the 64th write rejected.
 5. **"The rd_err errors look like three problems: a testbench error at reset, an RTL issue on the first read, then an off-by-one."** One problem. The DUT's `rd_err` is the correct pattern shifted one edge early, which gives an "extra" pulse on one row and a "missing" one on the next. Lining up DUT vs expected for every error row shows the shift. Comparing with `wr_err` (same model rule, same sampling, passing in TS-06) rules out the scoreboard.
 6. **"Is it a monitor sampling-time issue? The monitor samples the combinational pulse and mistakes it for the previous edge's output?"** No. The monitor reports exactly what the port shows. At 40 ns the DUT really shows `rd_err = 1` before any edge has rejected a read. A **registered** output is stable for the whole cycle between edges, so any mid-cycle sample point reads it correctly (that's why `wr_err` passes). Only a signal that changes *between* edges can look early, and that's precisely the §7 violation. Moving the sample point would hide the errors without fixing the DUT: changing the checker to match the DUT.
+7. **"Even for the rejected read, `rd_ptr` increments."** More precisely, the DUT **didn't** reject it: `rd_ptr` advancing, `rd_err` staying 0 and the level staying 0 are what an *accepted* read looks like. The bug is the acceptance decision (the read accepted at empty because a write happened on the same edge), not a pointer update on a rejected read.
+8. **"`empty` went back to 0 at c003 because `rd_ptr == wr_ptr` is no longer true."** After the bug-1 fix, `empty` comes from the entry **count**, not from comparing pointers. At c003 the DUT's level is 1 and the model's is 2: both non-zero, so `empty` agrees, but the levels still differ by one. That's why the `rd_ptr` mismatch continues. A mismatch disappearing doesn't mean the DUT has recovered.

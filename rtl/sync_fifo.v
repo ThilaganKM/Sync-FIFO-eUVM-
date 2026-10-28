@@ -56,7 +56,7 @@ module sync_fifo #(
     //   (no write-through).
     //------------------------------------------------------------------
     wire wr_acc = wr_en && (!full  || rd_en);
-    wire rd_acc = rd_en && (!empty || wr_en);
+    wire rd_acc = rd_en && !empty;
 
     wire wr_rej = !rst && wr_en && !wr_acc;
     wire rd_rej = !rst && rd_en && !rd_acc;
