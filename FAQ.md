@@ -48,6 +48,7 @@ Nothing here gives away anything about bugs in the RTL.
   - [Why `"uvm_test_top*"` and not `"uvm_test_top.*"` in `uvm_config_db::set`?](#why-uvm_test_top-and-not-uvm_test_top-in-uvm_config_dbset)
   - [Why are the files and classes named `fifo_intf` / `FifoIntf`?](#why-are-the-files-and-classes-named-fifo_intf--fifointf-not-interface--intf-as-in-the-comparator)
   - [How do I measure and merge coverage?](#how-do-i-measure-and-merge-coverage)
+  - [Coverage is 100 %. Am I done?](#coverage-is-100--am-i-done)
   - [How do I write functional coverage (covergroups) in eUVM?](#how-do-i-write-functional-coverage-covergroups-in-euvm)
   - [How do random tests work here, and are they reproducible?](#how-do-random-tests-work-here-and-are-they-reproducible)
   - [Why does randomizing an item crash with `Illegal instruction`?](#why-does-randomizing-an-item-crash-with-illegal-instruction)
@@ -792,6 +793,15 @@ Rules built into the merge:
 - Coverage is the union over the whole regression: one test may hit the full-level bins and another the reset bins.
 
 What to do with a hole: work out **why** the stimulus never produced that situation (too rare? never generated at all?), then add stimulus that targets it: a directed test, or new random weights. Rerun, and the hole should close. Coverage tells you where the testing is weak; it doesn't tell you the design is correct (that's the scoreboard's job).
+
+### Coverage is 100 %. Am I done?
+
+By the plan's completion criteria, perhaps, but **100 % means every situation you listed happened, not that every situation that matters did.** Coverage measures the **plan**, not the design. Two follow-ups:
+
+1. **Read the hit counts, not only the total.** In this project's first 100 % report, the rarest bins (reset at empty with requests held) were hit **only by the directed reset test**: random stimulus never produced them. Without that directed test, they would have been holes. Directed and random tests complement each other: random covers the bulk of combinations, directed tests reach specific corners.
+2. **Review the coverage model itself.** Ask what the plan requires that **no bin measures**. Example: "a read on the edge right after a write into an empty FIFO" (TS-09) needs a **transition** across two consecutive edges, which the single-edge `level × op` bins can't express. Other common gaps: data-value coverage (every bit of the data bus at 0 and 1), and combinations of events on the same edge.
+
+Functional coverage is also complemented by **code coverage** (lines and branches of the RTL actually executed), which catches design logic that no spec-level bin reaches.
 
 ### How do I write functional coverage (covergroups) in eUVM?
 
