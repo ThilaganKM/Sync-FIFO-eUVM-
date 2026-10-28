@@ -18,6 +18,8 @@ Nothing here gives away anything about bugs in the RTL.
   - [What's a "row" in `make table`, and where should an error pulse appear in it?](#whats-a-row-in-make-table-and-where-should-an-error-pulse-appear-in-it)
   - [`UVM_FATAL [INVTST] Requested test ... not found`: what does it mean?](#uvm_fatal-invtst-requested-test--not-found-what-does-it-mean)
   - [Several errors look like different problems. How do I tell if they're one?](#several-errors-look-like-different-problems-how-do-i-tell-if-theyre-one)
+  - [How are logs named? How do I run every test at once?](#how-are-logs-named-how-do-i-run-every-test-at-once)
+  - [`make table simultaneous.log` shows the wrong log. Why?](#make-table-simultaneouslog-shows-the-wrong-log-why)
   - [Where's the pass/fail result in the log?](#wheres-the-passfail-result-in-the-log)
   - [The scoreboard reported many errors. How do I read the first one correctly?](#the-scoreboard-reported-many-errors-how-do-i-read-the-first-one-correctly)
   - [`wr_ptr` is 6 bits wide. How can a 64-entry FIFO be full?](#wr_ptr-is-6-bits-wide-how-can-a-64-entry-fifo-be-full)
@@ -267,6 +269,46 @@ The scoreboard predicts the pulse for the request's own row and reports a mismat
 
 1. **Look for a pattern before explaining errors one by one.** Line up "what the DUT did" against "what the model expected" for every error row. Several errors are often **one shift**: the same pattern, displaced by one edge, produces an "extra" pulse on one row and a "missing" one on the next.
 2. **Compare with a sibling check that passes.** If two signals are predicted by the **same** model rule and sampled the **same** way, and one passes while the other fails, the model's timing can't be the problem: the difference is in the DUT. If both fail the same way, suspect the model or the monitor first.
+
+### How are logs named? How do I run every test at once?
+
+**Logs are named automatically after the test and the seed.** Earlier steps of this project used hand-picked `tee` names (`run.log`, `simultaneous.log`), which drift away from the test names and make it unclear which run produced a log. `make run` now writes the log itself:
+
+```bash
+make run TEST=fifo_test.FifoWriteReadSimTest          # -> sim/logs/FifoWriteReadSimTest_s1.log
+make run TEST=fifo_test.FifoWriteReadSimTest SEED=7   # -> sim/logs/FifoWriteReadSimTest_s7.log
+```
+
+The output still appears in the terminal (`... 2>&1 | tee logs/<Test>_s<seed>.log` inside the recipe), so there's no need to add `| tee` yourself. Rerunning the same test and seed overwrites its own log; a new seed gets a new file.
+
+**Regression:** `make regress` runs every test in the makefile's `TESTS` list with one seed, then prints `make summary`:
+
+```
+running FifoTest (seed 1) -> logs/FifoTest_s1.log
+...
+log                         test                  seed  edges ... result
+FifoFillDrainTest_s1.log    FifoFillDrainTest        1    129 ... PASS
+...
+```
+
+When you add a test class to `fifo_test.d`, add its name to `TESTS` too.
+
+**Viewing:** `make view` / `make table` now default to the **most recent** log in `logs/`, so right after a run, `make table ARGS=--first-error` just works. Pass `LOG=logs/<Test>_s<seed>.log` for a specific one.
+
+**Cleaning:** `make clean` removes build products but **keeps the logs**; `make cleanlogs` deletes `logs/`. Note that the waveform (`sync_fifo_tb.vcd`) is still one file, overwritten by every run: it always belongs to the **last** test you ran.
+
+### `make table simultaneous.log` shows the wrong log. Why?
+
+Make's variables are passed as **`NAME=value`**:
+
+```bash
+make table LOG=simultaneous.log                       # ✅
+make table LOG=simultaneous.log ARGS=--first-error    # ✅
+make table LOG=x.log ARGS="--around 1300 --context 5" # ✅ quotes when ARGS has spaces
+make table simultaneous.log                           # ❌
+```
+
+Without `LOG=`, make treats `simultaneous.log` as a second **target** to build: it prints `make: Nothing to be done for 'simultaneous.log'` and shows the default log (`LOG ?= run.log`). The same applies to `make view`.
 
 ### Where's the pass/fail result in the log?
 

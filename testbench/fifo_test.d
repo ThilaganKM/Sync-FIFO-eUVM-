@@ -79,3 +79,10 @@ class FifoWriteFullTest : FifoBaseTest
     this(string name, uvm_component parent = null) { super(name, parent); }
     override FifoBaseSeq createSeq() { return FifoWriteFullSeq.type_id.create("seq"); }
 }
+// TS-08: simultaneous read + write at empty, middle and full (SPEC §6)
+class FifoWriteReadSimTest : FifoBaseTest
+{
+    mixin uvm_component_utils;
+    this(string name, uvm_component parent = null) { super(name, parent); }
+    override FifoBaseSeq createSeq() { return FifoWriteReadSimSeq.type_id.create("seq"); }
+}

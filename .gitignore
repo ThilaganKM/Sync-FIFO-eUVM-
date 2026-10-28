@@ -11,3 +11,4 @@ sim/sync_fifo_tb
 sim/*.o
 sim/*.vcd
 sim/*.log
+sim/logs/

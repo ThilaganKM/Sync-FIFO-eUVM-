@@ -208,6 +208,11 @@ def parse_log(lines):
         if m:
             sev, _f, _l, t_ps, _path, tag, msg = m.groups()
             t_ns = int(t_ps) / 1000.0
+            if tag == "RNTST":                       # "Running test fifo_test.X..."
+                rt = re.search(r"Running test (\S+?)\.{0,3}$", msg)
+                if rt:
+                    meta["test"] = rt.group(1)
+                continue
             if tag == "MON":
                 mons.append((t_ns, dict(KV.findall(msg))))
             elif tag == "SCB" and "samples=" in msg:

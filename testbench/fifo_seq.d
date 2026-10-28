@@ -139,3 +139,23 @@ class FifoWriteFullSeq : FifoBaseSeq
         doIdle(2);
     }
 }
+
+class FifoWriteReadSimSeq : FifoBaseSeq
+{
+    mixin uvm_object_utils;
+    this(string name="FifoWriteReadSimSeq"){super(name);}
+
+    override void body()
+    {
+        doReset(1);
+        doReadWrite(1);//write accepted, read rejected, rerr is asserted
+        doIdle(1);//rerr goes down
+        doWrites(2);
+        doReadWrite(4);//read old data while writing to fifo
+        doReads(3);//drain the fifo
+        doWrites(64);
+        doReadWrite(4);//when fifo full, read and write on the same edge
+        doReads(64);//drain the fifo
+        doIdle(2);
+    }
+}

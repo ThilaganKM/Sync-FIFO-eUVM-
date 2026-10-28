@@ -691,3 +691,44 @@ Predictions given before running, all correct: (1) after the first read, `rptr=0
 ### Review 8: first real runs of TS-05 and TS-06
 
 `make summary`: `FifoWriteFullTest` **PASS** (138 edges, 64 data checks, 0 mismatches); `FifoReadEmptyTest` **FAIL** (4 mismatches). The debugging of the failure is recorded in `SOLUTIONS.md` (spoilers).
+
+---
+
+## Design: TS-08 simultaneous read + write (before code)
+
+SPEC §6 gives three behaviours for `wr_en = rd_en = 1` on one edge, depending on the level **before** the edge: at **empty**, the write is accepted and the read rejected (no write-through, `rd_err`), count +1; in the **middle**, both are accepted, count unchanged; at **full**, both are accepted (the read frees a slot), still full, no `wr_err`. So the sequence brings the FIFO to each level, then applies `doReadWrite(n)`:
+
+```
+reset
+(a) empty:  doReadWrite(1); doIdle(1)
+            doWrites(2)                       // level 3
+(b) middle: doReadWrite(4)                    // overlapping old reads / new writes keep FIFO order
+            doReads(3)                        // drain
+            doWrites(64)                      // full
+(c) full:   doReadWrite(4)                    // accepted every edge; the opposite of TS-06
+            doReads(64); doIdle(2)            // every byte checked in order
+```
+
+Predictions requested before running: the outputs after (a), which byte is read first in (b), and why (c) differs from TS-06 (§6 vs §4).
+
+### Review 9: `FifoWriteReadSimSeq` (TS-08) and `FifoWriteReadSimTest`
+
+The sequence follows the design, with comments stating what each step **expects** ✅. One count was off:
+
+| # | Sev. | Issue | Why it matters | Fix |
+|---|---|---|---|---|
+| 1 | 🔴 | `doReads(2)` to drain after phase (b) | Level bookkeeping: (a) read+write at **empty** = write **accepted**, read rejected → level 1; `doWrites(2)` → 3; (b) four read+writes → still 3. So 7 bytes in, 4 out, **3** left. The question "isn't 6 enough? is the extra read meant to trigger `rd_err`?" missed the byte written in (a). With 2 reads, 1 byte stays, `doWrites(64)` fills the FIFO after 63 and **rejects the 64th**: an unintended TS-06 case inside TS-08, and the "fill from empty" boundary disappears. No false errors (the scoreboard tracks the real level), but the test no longer does what its comments say. | `doReads(3);` with a comment showing the count |
+
+The test class `FifoWriteReadSimTest` was added to `fifo_test.d` (on request). Compiles.
+
+> **Lesson:** keep a **level table** (writes in, reads out, level after) for every directed sequence. A directed test is only meaningful if it puts the DUT exactly where its comments claim.
+
+### Review 9, follow-up: TS-08 predictions
+
+| # | Prediction | Review |
+|---|---|---|
+| 1–4 | (a) `wptr`→1, `rptr`=0, `rerr`=1, `empty`→0; the new byte shows on `rdata` afterwards; (b) `wptr` 3→7, `rptr` 0→4; the first read in (b) consumes the byte from (a) | ✅ |
+| 5 | (c) "pointers don't move, at 64" | ❌ At full with read+write, **both** requests are accepted, so **both** pointers advance every edge. A 6-bit pointer is 0–63, so never 64. Level bookkeeping: `rptr` 4 → 7 after the 3-read drain; 64 writes take `wptr` from 7 to 71 mod 64 = **7**; so full with `wptr = rptr = 7`, then (c) moves both to 8…11. |
+| 6 | (c) differs from TS-06 "because of show-ahead" | ⚠️ The right clause (§6), the wrong reason. It's not about show-ahead. When full, `wr_ptr == rd_ptr`: the slot read at this edge is the slot written, so the read frees it as the write fills it, and no unread data is overwritten. TS-06 had no read on the same edge, so there was no free slot. |
+
+First run: `UVM_ERROR : 22`. Debugging recorded in `SOLUTIONS.md`.
