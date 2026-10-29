@@ -1,0 +1,9 @@
+Sync-FIFO-eUVM: eUVM Bug Hunt 2 (synchronous FIFO walkthrough)
+
+Copyright 2026 Thilagan KM
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The RTL (with intentionally planted bugs), parts of the testbench
+infrastructure, the scoreboard, the coverage collector, the log tools and
+most of the documentation were written with AI assistance (Claude, Anthropic).
