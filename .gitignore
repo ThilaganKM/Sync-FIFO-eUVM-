@@ -12,3 +12,5 @@ sim/*.o
 sim/*.vcd
 sim/*.log
 sim/logs/
+sim/*.dat
+sim/cov_annotated/

@@ -35,7 +35,8 @@ VLATOR_OBJS = euvm_dir/V$(DUT)_euvm.d \
               euvm_dir/V$(DUT)_euvm_funcs.o \
               euvm_dir/verilated_vcd_d.o euvm_dir/verilated_d.o \
               obj_dir/V$(DUT)__ALL.a \
-              obj_dir/verilated.o obj_dir/verilated_threads.o obj_dir/verilated_vcd_c.o
+              obj_dir/verilated.o obj_dir/verilated_threads.o obj_dir/verilated_vcd_c.o \
+              obj_dir/verilated_cov.o euvm_dir/fifo_codecov.o
 
 # ---------------------------------------------------------------
 # Tests and logs
@@ -49,7 +50,7 @@ LOGDIR   = logs
 TESTNAME = $(lastword $(subst ., ,$(TEST)))
 RUNLOG   = $(LOGDIR)/$(TESTNAME)_s$(SEED).log
 
-.PHONY: all run regress seeds view table summary coverage clean cleanlogs
+.PHONY: all run regress seeds view table summary coverage codecov clean cleanlogs
 
 # If a recipe fails, delete its target (e.g. verilator.stamp), so a failed
 # step is never mistaken for a finished one on the next make.
@@ -64,7 +65,7 @@ all: $(TOP)
 # without this, the two streams interleave out of order in the terminal/log.
 run: $(TOP)
 	@mkdir -p $(LOGDIR)
-	stdbuf -oL ./$(TOP) +UVM_TESTNAME=$(TEST) +UVM_VERBOSITY=$(VERBOSITY) +seed=$(SEED) 2>&1 | tee $(RUNLOG)
+	stdbuf -oL ./$(TOP) +UVM_TESTNAME=$(TEST) +UVM_VERBOSITY=$(VERBOSITY) +seed=$(SEED) +codecov=$(LOGDIR)/$(TESTNAME)_s$(SEED).dat 2>&1 | tee $(RUNLOG)
 	@echo "Log written to $(RUNLOG)"
 
 # Every test in TESTS with the same SEED, then the summary table.
@@ -108,9 +109,23 @@ summary:
 coverage:
 	@python3 logview.py --color --coverage $(sort $(wildcard $(LOGDIR)/*.log))
 
+# Code coverage (Verilator --coverage: lines and toggles of the RTL), merged
+# over the PASSING runs in logs/ (each run writes logs/<Test>_s<seed>.dat).
+#   make codecov   -> total, per-test ranking, annotated RTL in cov_annotated/
+VLCOV      = $(VLBINDIR)verilator_coverage
+PASS_DATS  = $(patsubst %.log,%.dat,$(shell python3 logview.py --list-passing $(sort $(wildcard $(LOGDIR)/*.log))))
+codecov:
+	@test -n "$(strip $(PASS_DATS))" || { echo "No passing runs with coverage data in $(LOGDIR)/"; exit 1; }
+	@$(VLCOV) --write codecov_merged.dat $(PASS_DATS)
+	@echo "Per-test contribution (Rank 0 = adds nothing new once the higher-ranked tests have run):"
+	@$(VLCOV) --rank $(PASS_DATS)
+	@rm -rf cov_annotated
+	@$(VLCOV) --annotate cov_annotated --annotate-all --annotate-min 1 codecov_merged.dat
+	@echo "Annotated RTL: sim/cov_annotated/$(DUT).v  (count per line; '%000000' = never executed)"
+
 # Build products only. Logs are kept: delete them with `make cleanlogs`.
 clean:
-	rm -rf $(TOP) $(TOP).o *.vcd euvm_dir obj_dir verilator.stamp
+	rm -rf $(TOP) $(TOP).o *.vcd euvm_dir obj_dir verilator.stamp codecov_merged.dat cov_annotated
 
 cleanlogs:
 	rm -rf $(LOGDIR)
@@ -120,13 +135,14 @@ cleanlogs:
 # ---------------------------------------------------------------
 # The stamp is touched FIRST, so every file generated below is newer than it.
 # (.DELETE_ON_ERROR removes the stamp again if any step fails.)
-verilator.stamp: $(RTL_SRC)
+verilator.stamp: $(RTL_SRC) ../testbench/fifo_codecov.cpp makefile
 	touch verilator.stamp
-	verilator --no-timing --threads 1 --trace --cc --euvm $^
+	verilator --no-timing --threads 1 --trace --coverage --cc --euvm $(RTL_SRC)
 	(cd euvm_dir; g++ -c $(VL_INC) V$(DUT)_euvm_funcs.cpp)
 	(cd euvm_dir; g++ -c $(VL_INC) $(ESDL_CPP)/verilated_vcd_d.cpp -o verilated_vcd_d.o)
 	(cd euvm_dir; g++ -c $(VL_INC) $(ESDL_CPP)/verilated_d.cpp -o verilated_d.o)
-	$(MAKE) -C obj_dir -f V$(DUT).mk V$(DUT)__ALL.a verilated.o verilated_vcd_c.o verilated_threads.o
+	$(MAKE) -C obj_dir -f V$(DUT).mk V$(DUT)__ALL.a verilated.o verilated_vcd_c.o verilated_threads.o verilated_cov.o
+	(cd euvm_dir; g++ -c -DVM_COVERAGE=1 $(VL_INC) ../../testbench/fifo_codecov.cpp -o fifo_codecov.o)
 
 $(VLATOR_OBJS): verilator.stamp
 

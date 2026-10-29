@@ -803,3 +803,18 @@ Sequence: `doReset(2)` (required), then three 2000-cycle phases: **fill-biased**
 | YAML between `COVERAGE-BEGIN/END` | Machine-readable, so `logview.py --coverage` can merge any number of runs |
 
 Smoke-test sanity check: writes at levels 0→1→2→3 hit `empty_wr`, `one_wr`, `mid_wr` ×2; reads back down hit `mid_rd` ×3, `one_rd`; matches by hand.
+
+---
+
+## Code coverage (Verilator `--coverage`): added by the reviewer on request
+
+| Change | Why |
+|---|---|
+| `--coverage` on the `verilator` line; `verilated_cov.o` built and linked | Line and toggle counters in the C++ model |
+| `testbench/fifo_codecov.cpp`: `fifo_codecov_write(file)` | The eUVM D bindings can't save the counters, so a 3-line C++ function does it through Verilator's default context (the model is created with `new Vsync_fifo()`) |
+| `sync_fifo_tb.d`: `extern(C)` declaration, and a call after `tb.start()` when `+codecov=<file>` is given | Saves once the simulation has finished |
+| `make run` passes `+codecov=logs/<Test>_s<seed>.dat` | One coverage file per run, next to its log |
+| `make codecov` | Merges the **passing** runs only (`logview.py --list-passing`, the same rule as `make coverage`), ranks the tests, and annotates the RTL |
+| `verilator.stamp` now also depends on `makefile` and `fifo_codecov.cpp` | A change in the Verilator flags must re-Verilate; before this, only an RTL change did |
+
+Verified on a clean scratch build: 7/7 + 2 extra random seeds pass; code coverage 42/42 (100 %); `--rank` shows `FifoRandomTest_s1` alone reaches every point; functional coverage on the same runs is 37/38 (hole `rst_full_rd`). A concrete demonstration that the two metrics measure different things.

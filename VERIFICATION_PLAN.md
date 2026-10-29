@@ -101,7 +101,7 @@ Implemented in `testbench/fifo_coverage.d` (`FifoCoverage`), a second subscriber
 
 The cross is a coverpoint on a combined value (`levelBin * 4 + op`) because esdl's per-bin report crashes on `cross` (see FAQ). The level comes from the DUT's outputs (`full` → 64, else `(wr_ptr − rd_ptr) mod 64`), which is valid because the scoreboard independently checks those outputs; coverage only counts passing runs.
 
-**Code coverage:** Verilator `--coverage` (line and toggle) on the DUT, as a secondary metric (not yet enabled).
+**Code coverage:** Verilator `--coverage` (line and toggle) on the DUT, as a secondary metric. Each run writes `logs/<Test>_s<seed>.dat`; `make codecov` merges the passing runs, ranks the tests and annotates the RTL (`sim/cov_annotated/`).
 
 ---
 

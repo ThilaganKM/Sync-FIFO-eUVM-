@@ -12,6 +12,7 @@ This script only changes how it is *displayed*. Three views:
                      scoreboard's verdict for that edge (errors listed below
                      their row; changed outputs highlighted)
   --summary          one line per log file: test, seed, check counts, PASS/FAIL
+  --list-passing     print the names of the logs whose verdict is PASS
   --coverage         functional coverage merged over all PASSING logs: every bin,
                      its hits, how many runs hit it, and the HOLES (bins never hit)
 
@@ -580,6 +581,7 @@ def main():
     ap.add_argument("--table", action="store_true", help="one row per rising edge")
     ap.add_argument("--summary", action="store_true", help="one line per log file")
     ap.add_argument("--coverage", action="store_true", help="merge coverage bins across logs")
+    ap.add_argument("--list-passing", action="store_true", help="print the logs whose verdict is PASS")
     ap.add_argument("--errors-only", action="store_true")
     ap.add_argument("--first-error", action="store_true")
     ap.add_argument("--around", type=float, default=None, metavar="NS")
@@ -596,6 +598,12 @@ def main():
             return
         if a.coverage:
             coverage_view(a.logfile)
+            return
+        if a.list_passing:                   # used by `make codecov`
+            for f in a.logfile:
+                with open(f) as fh:
+                    if verdict(parse_log(fh)[2])[0] == "PASS":
+                        print(f)
             return
         if len(a.logfile) > 1:
             ap.error("give one log file (several only with --summary)")

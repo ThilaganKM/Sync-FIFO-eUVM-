@@ -132,9 +132,15 @@ class SyncFifoTb: uvm_tb
     }
 }
 
+// Writes Verilator's code coverage counters to a file (testbench/fifo_codecov.cpp).
+extern(C) void fifo_codecov_write(const(char)* filename);
+
 void main(string[] args)
 {
+    import std.string: toStringz;
+
     uint seed;
+    string codecov;
 
     CommandLine cmdl = new CommandLine(args);
 
@@ -149,4 +155,11 @@ void main(string[] args)
     tb.elaborate("tb", args);
     tb.set_seed(seed);
     tb.start();
+
+    // After the simulation: save code coverage if +codecov=<file> was given
+    // (make run does this: logs/<Test>_s<seed>.dat).
+    if (cmdl.plusArgs("codecov=" ~ "%s", codecov)) {
+        fifo_codecov_write(codecov.toStringz());
+        writeln("Code coverage written to ", codecov);
+    }
 }

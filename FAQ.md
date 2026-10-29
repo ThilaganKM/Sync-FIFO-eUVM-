@@ -48,6 +48,7 @@ Nothing here gives away anything about bugs in the RTL.
   - [Why `"uvm_test_top*"` and not `"uvm_test_top.*"` in `uvm_config_db::set`?](#why-uvm_test_top-and-not-uvm_test_top-in-uvm_config_dbset)
   - [Why are the files and classes named `fifo_intf` / `FifoIntf`?](#why-are-the-files-and-classes-named-fifo_intf--fifointf-not-interface--intf-as-in-the-comparator)
   - [How do I measure and merge coverage?](#how-do-i-measure-and-merge-coverage)
+  - [How do I get code coverage, and how is it different from functional coverage?](#how-do-i-get-code-coverage-and-how-is-it-different-from-functional-coverage)
   - [Coverage is 100 %. Am I done?](#coverage-is-100--am-i-done)
   - [How do I write functional coverage (covergroups) in eUVM?](#how-do-i-write-functional-coverage-covergroups-in-euvm)
   - [How do random tests work here, and are they reproducible?](#how-do-random-tests-work-here-and-are-they-reproducible)
@@ -793,6 +794,35 @@ Rules built into the merge:
 - Coverage is the union over the whole regression: one test may hit the full-level bins and another the reset bins.
 
 What to do with a hole: work out **why** the stimulus never produced that situation (too rare? never generated at all?), then add stimulus that targets it: a directed test, or new random weights. Rerun, and the hole should close. Coverage tells you where the testing is weak; it doesn't tell you the design is correct (that's the scoreboard's job).
+
+### How do I get code coverage, and how is it different from functional coverage?
+
+**Code coverage** measures which parts of the **RTL** were exercised: each line and branch, and each bit toggling 0→1→0. Verilator provides it with `--coverage`. In this flow:
+
+| Piece | What it does |
+|---|---|
+| `verilator ... --coverage` (makefile) | Inserts coverage counters into the generated C++ model |
+| `testbench/fifo_codecov.cpp` | One C++ function, `fifo_codecov_write(file)`, that saves the counters: `Verilated::defaultContextp()->coveragep()->write(file)`. The eUVM D bindings have no call for this, so the D top declares it `extern(C)` and calls it after `tb.start()` returns. |
+| `+codecov=<file>` plusarg | `make run` passes `logs/<Test>_s<seed>.dat`, so each run's coverage sits next to its log |
+| `make codecov` | Merges the `.dat` files of the **passing** runs (`verilator_coverage --write`), ranks the tests (`--rank`), and writes the RTL annotated with hit counts to `sim/cov_annotated/` (lines starting `%000000` never executed) |
+
+```bash
+make regress
+make seeds TEST=fifo_test.FifoRandomTest
+make codecov       # code coverage: RTL lines and toggles
+make coverage      # functional coverage: spec situations (38 bins)
+```
+
+**The difference, shown by this project.** After the 7 tests plus random seeds 1–3:
+
+| Metric | Result |
+|---|---|
+| Code coverage | **100 %**, and `--rank` shows **one random seed alone** reaches all of it |
+| Functional coverage | **37/38**: hole `rst_full_rd` (a reset while full, with a read held) |
+
+Every RTL line had executed, yet one situation the spec cares about had never happened. Code coverage asks *"did each part of the design run?"*; functional coverage asks *"did each situation in the plan occur?"*. A small design saturates code coverage quickly, so functional coverage is the stricter measure. (Running more random seeds closes that particular hole.) Industry sign-off uses **both**: a line that never ran is untested logic, and a spec situation that never occurred is an untested requirement.
+
+The `--rank` table: `Covered` = points that run hit on its own; `Rank` 1, 2, … = the order in which runs add *new* points; `Rank 0` = adds nothing new once the higher-ranked runs are included. It's a quick way to see which tests are redundant **for code coverage**, but not for functional coverage, as the reset-at-empty bins (directed test only) show.
 
 ### Coverage is 100 %. Am I done?
 
